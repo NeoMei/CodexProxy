@@ -64,10 +64,5 @@
         "depends": ["nodejs >= 18"]
       }
     }
-  },
-  "plugins": {
-    "autostart": {
-      "enabled": true
-    }
   }
 }
