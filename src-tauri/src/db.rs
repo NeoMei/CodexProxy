@@ -71,6 +71,30 @@ impl Database {
             INSERT OR IGNORE INTO settings (key, value) VALUES ('current_model', '');
             "
         ).map_err(|e| e.to_string())?;
+
+        // Seed built-in presets if table is empty
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM providers", [], |row| row.get(0)
+        ).unwrap_or(0);
+        if count == 0 {
+            let presets = vec![
+                ("preset-kimi", "Kimi K2.7 Code", "kimi-for-coding", "https://api.kimi.com/coding/v1", 262144, 32768),
+                ("preset-glm", "GLM 5.2", "glm-5.2", "https://open.bigmodel.cn/api/anthropic/v1", 200000, 32768),
+                ("preset-deepseek", "DeepSeek V4 Pro", "deepseek-v4-pro", "https://api.deepseek.com/anthropic/v1", 1000000, 384000),
+                ("preset-volcengine", "Volcengine AgentPlan", "doubao-seed-2.0", "https://ark.cn-beijing.volces.com/api/anthropic/v1", 200000, 32768),
+                ("preset-bailian", "Bailian Coding Plan", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/anthropic/v1", 200000, 32768),
+                ("preset-openai", "OpenAI GPT-5.5", "gpt-5.5", "https://api.openai.com/v1", 272000, 128000),
+                ("preset-anthropic", "Claude Opus 4", "claude-opus-4-20250514", "https://api.anthropic.com/v1", 200000, 32768),
+                ("preset-google", "Gemini 2.5 Pro", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta", 1048576, 65536),
+            ];
+            for (i, (id, name, model, upstream, ctx, max_tok)) in presets.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO providers (id, name, model, upstream, api_key, context_window, max_output_tokens, enabled, sort_index)
+                     VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, 1, ?7)",
+                    rusqlite::params![id, name, model, upstream, *ctx as i64, *max_tok as i64, i as i32],
+                ).ok();
+            }
+        }
         Ok(())
     }
 

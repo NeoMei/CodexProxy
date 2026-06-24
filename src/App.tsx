@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
+import { t, setLocale, getLocale } from "./data/locale";
+import { BUILTIN_PRESETS, findPreset } from "./data/presets";
 
 interface Provider {
   id: string;
@@ -13,13 +16,25 @@ interface Provider {
   sort_index: number;
 }
 
+function AppShell() {
+  return (
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
+  );
+}
+
 function App() {
+  const { theme, toggle: toggleTheme } = useTheme();
+  const [locale, setLoc] = useState(getLocale());
   const [providers, setProviders] = useState<Provider[]>([]);
   const [proxyRunning, setProxyRunning] = useState(false);
   const [proxyPort, setProxyPort] = useState(15731);
+  const [showCodexConfig, setShowCodexConfig] = useState(false);
   const [codexConfig, setCodexConfig] = useState("");
   const [editing, setEditing] = useState<Provider | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [quickSetup, setQuickSetup] = useState<string | null>(null); // preset model slug
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [autoStart, setAutoStart] = useState(false);
@@ -32,43 +47,35 @@ function App() {
   const refreshStatus = useCallback(async () => {
     const running = await invoke<boolean>("proxy_status");
     setProxyRunning(running);
-    try {
-      const port = await invoke<number>("proxy_port");
-      setProxyPort(port);
-    } catch {}
-    try {
-      const cfg = await invoke<string>("read_codex_config");
-      setCodexConfig(cfg);
-    } catch {}
+    try { setProxyPort(await invoke<number>("proxy_port")); } catch {}
+    try { setCodexConfig(await invoke<string>("read_codex_config")); } catch {}
   }, []);
 
+  useEffect(() => { refreshProviders(); refreshStatus(); }, [refreshProviders, refreshStatus]);
   useEffect(() => {
-    refreshProviders();
-    refreshStatus();
-    const timer = setInterval(refreshStatus, 3000);
+    const timer = setInterval(refreshStatus, 5000);
     return () => clearInterval(timer);
-  }, [refreshProviders, refreshStatus]);
+  }, [refreshStatus]);
 
   useEffect(() => {
     invoke<string>("get_setting", { key: "auto_start" }).then(v => setAutoStart(v === "true")).catch(() => {});
   }, []);
 
+  const switchLocale = (l: string) => { setLoc(l); setLocale(l); };
+
   const toggleProxy = async () => {
-    if (proxyRunning) {
-      await invoke("stop_proxy");
-    } else {
-      await invoke("start_proxy");
-    }
+    if (proxyRunning) await invoke("stop_proxy");
+    else await invoke("start_proxy");
     refreshStatus();
   };
 
   const testProvider = async (p: Provider) => {
     setTesting(t => ({ ...t, [p.id]: true }));
     try {
-      const result = await invoke<string>("test_connection", { provider: p });
-      setTestResult(t => ({ ...t, [p.id]: "✅ " + result }));
+      await invoke<string>("test_connection", { provider: p });
+      setTestResult(t => ({ ...t, [p.id]: "ok" }));
     } catch (e: any) {
-      setTestResult(t => ({ ...t, [p.id]: "❌ " + e }));
+      setTestResult(t => ({ ...t, [p.id]: "fail" }));
     }
     setTesting(t => ({ ...t, [p.id]: false }));
   };
@@ -81,8 +88,7 @@ function App() {
   const saveProvider = async (p: Provider) => {
     if (!p.id) p.id = await invoke<string>("generate_id");
     await invoke("save_provider", { provider: p });
-    setEditing(null);
-    setShowAdd(false);
+    setEditing(null); setShowAdd(false); setQuickSetup(null);
     refreshProviders();
   };
 
@@ -97,187 +103,298 @@ function App() {
     await invoke("set_setting", { key: "auto_start", value: String(next) });
   };
 
+  const openQuickSetup = (model: string) => {
+    const preset = findPreset(model);
+    if (preset) {
+      setEditing({
+        id: "", name: preset.name, model: preset.model, upstream: preset.upstream,
+        api_key: "", context_window: preset.contextWindow, max_output_tokens: preset.maxOutputTokens,
+        enabled: true, sort_index: 0,
+      });
+    }
+    setQuickSetup(model);
+    setShowAdd(false);
+  };
+
   const emptyProvider = (): Provider => ({
     id: "", name: "", model: "", upstream: "", api_key: "",
     context_window: 262144, max_output_tokens: 32768, enabled: true, sort_index: 0,
   });
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className={`h-screen flex flex-col ${theme === "light" ? "bg-white text-zinc-900" : "bg-zinc-950 text-zinc-200"}`}>
       {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 bg-zinc-950">
+      <header className={`flex items-center justify-between px-5 py-2.5 border-b ${theme === "light" ? "border-zinc-200 bg-zinc-50" : "border-zinc-800 bg-zinc-950"}`}>
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold">Coding Plan Proxy</h1>
-          <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs ${
-            proxyRunning ? "bg-green-900/50 text-green-400" : "bg-zinc-800 text-zinc-500"
+          <h1 className="text-base font-semibold tracking-tight">{t("app.title")}</h1>
+          <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
+            proxyRunning
+              ? (theme === "light" ? "bg-emerald-100 text-emerald-700" : "bg-emerald-900/40 text-emerald-400")
+              : (theme === "light" ? "bg-zinc-100 text-zinc-500" : "bg-zinc-800 text-zinc-500")
           }`}>
-            <span className={`w-2 h-2 rounded-full ${proxyRunning ? "bg-green-400" : "bg-zinc-600"}`} />
-            {proxyRunning ? `Running :${proxyPort}` : "Stopped"}
+            <span className={`w-2 h-2 rounded-full ${proxyRunning ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"}`} />
+            {proxyRunning ? `${t("proxy.running")} :${proxyPort}` : t("proxy.stopped")}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={toggleProxy}
+        <div className="flex items-center gap-1.5">
+          {/* Locale toggle */}
+          <button onClick={() => switchLocale(locale === "zh" ? "en" : "zh")}
+            className={`px-2 py-1 text-xs rounded border transition ${theme === "light" ? "border-zinc-200 hover:bg-zinc-100" : "border-zinc-700 hover:bg-zinc-800"}`}>
+            {locale === "zh" ? "EN" : "中"}
+          </button>
+          {/* Theme toggle */}
+          <button onClick={toggleTheme}
+            className={`px-2 py-1 text-xs rounded border transition ${theme === "light" ? "border-zinc-200 hover:bg-zinc-100" : "border-zinc-700 hover:bg-zinc-800"}`}>
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+          {/* Proxy toggle */}
+          <button onClick={toggleProxy}
             className={`px-4 py-1.5 rounded text-sm font-medium transition ${
               proxyRunning
-                ? "bg-red-600/20 text-red-400 border border-red-600/30 hover:bg-red-600/30"
-                : "bg-green-600/20 text-green-400 border border-green-600/30 hover:bg-green-600/30"
-            }`}
-          >
-            {proxyRunning ? "Stop Proxy" : "Start Proxy"}
+                ? "bg-red-600/10 text-red-600 border border-red-600/20 hover:bg-red-600/20"
+                : "bg-emerald-600/10 text-emerald-600 border border-emerald-600/20 hover:bg-emerald-600/20"
+            }`}>
+            {proxyRunning ? t("proxy.stop") : t("proxy.start")}
           </button>
         </div>
       </header>
 
       {/* Main */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-5">
         {/* Providers */}
-        <div className="mb-6">
+        <div className="mb-5">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Providers</h2>
-            <button
-              onClick={() => { setEditing(emptyProvider()); setShowAdd(true); }}
-              className="px-3 py-1 text-sm bg-blue-600/20 text-blue-400 border border-blue-600/30 rounded hover:bg-blue-600/30 transition"
-            >
-              + Add Provider
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">{t("providers.title")}</h2>
+            <button onClick={() => { setEditing(emptyProvider()); setShowAdd(true); setQuickSetup(null); }}
+              className={`px-3 py-1 text-sm rounded border transition ${
+                theme === "light"
+                  ? "border-blue-200 text-blue-600 hover:bg-blue-50"
+                  : "border-blue-600/30 text-blue-400 hover:bg-blue-600/20"
+              }`}>
+              {t("providers.add")}
             </button>
           </div>
 
           <div className="space-y-2">
-            {providers.map(p => (
-              <div key={p.id} className={`flex items-center gap-3 p-3 rounded-lg border transition ${
-                p.enabled ? "border-zinc-700 bg-zinc-900/50" : "border-zinc-800 bg-zinc-950/50 opacity-60"
-              }`}>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm">{p.name}</span>
-                    <code className="text-xs bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">{p.model}</code>
-                    {p.enabled && proxyRunning && (
-                      <button
-                        onClick={() => applyModel(p.model)}
-                        className="text-xs px-2 py-0.5 bg-purple-600/20 text-purple-400 border border-purple-600/30 rounded hover:bg-purple-600/30"
-                        title="Set as current model in Codex"
-                      >
-                        Apply to Codex
-                      </button>
+            {providers.map(p => {
+              const hasKey = p.api_key.length > 4;
+              const testState = testResult[p.id];
+              return (
+                <div key={p.id}
+                  className={`flex items-center gap-3 p-3 rounded-lg border transition ${
+                    theme === "light"
+                      ? (p.enabled ? "border-zinc-200 bg-white" : "border-zinc-100 bg-zinc-50 opacity-60")
+                      : (p.enabled ? "border-zinc-700/50 bg-zinc-900/50" : "border-zinc-800 bg-zinc-900/20 opacity-60")
+                  }`}>
+                  {/* Provider icon */}
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
+                    theme === "light" ? "bg-zinc-100 text-zinc-600" : "bg-zinc-800 text-zinc-400"
+                  }`}>
+                    {p.name.charAt(0)}
+                  </div>
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{p.name}</span>
+                      <code className={`text-xs px-1.5 py-0.5 rounded ${theme === "light" ? "bg-zinc-100 text-zinc-500" : "bg-zinc-800 text-zinc-400"}`}>{p.model}</code>
+                      <span className={`text-xs ${hasKey ? "text-emerald-500" : "text-amber-500"}`}>
+                        {hasKey ? t("providers.keySet") : t("providers.keyMissing")}
+                      </span>
+                    </div>
+                    <div className="text-xs text-zinc-500 mt-0.5 truncate">{p.upstream}</div>
+                    {testState && (
+                      <span className={`text-xs ${testState === "ok" ? "text-emerald-500" : "text-red-500"}`}>
+                        {testState === "ok" ? t("providers.testOk") : t("providers.testFail")}
+                      </span>
                     )}
                   </div>
-                  <div className="text-xs text-zinc-500 mt-0.5 truncate">{p.upstream}</div>
-                  {testResult[p.id] && (
-                    <div className={`text-xs mt-1 ${testResult[p.id].startsWith("✅") ? "text-green-400" : "text-red-400"}`}>
-                      {testResult[p.id]}
-                    </div>
-                  )}
+                  {/* Actions */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {p.enabled && proxyRunning && (
+                      <button onClick={() => applyModel(p.model)}
+                        className={`text-xs px-2 py-1 rounded border transition ${
+                          theme === "light"
+                            ? "border-violet-200 text-violet-600 hover:bg-violet-50"
+                            : "border-violet-600/30 text-violet-400 hover:bg-violet-600/20"
+                        }`}>
+                        {t("providers.apply")}
+                      </button>
+                    )}
+                    <button onClick={() => testProvider(p)} disabled={testing[p.id]}
+                      className={`p-1.5 text-xs rounded transition disabled:opacity-50 ${theme === "light" ? "hover:bg-zinc-100 text-zinc-400" : "hover:bg-zinc-700 text-zinc-400"}`}>
+                      {testing[p.id] ? "⏳" : "🔍"}
+                    </button>
+                    <button onClick={() => { setEditing({ ...p }); setShowAdd(false); setQuickSetup(null); }}
+                      className={`p-1.5 text-xs rounded transition ${theme === "light" ? "hover:bg-zinc-100 text-zinc-400" : "hover:bg-zinc-700 text-zinc-400"}`}>
+                      ✏️
+                    </button>
+                    <button onClick={() => deleteProvider(p.id)}
+                      className={`p-1.5 text-xs rounded transition ${theme === "light" ? "hover:bg-red-50 text-zinc-400 hover:text-red-500" : "hover:bg-zinc-700 text-zinc-400 hover:text-red-400"}`}>
+                      🗑
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => testProvider(p)}
-                    disabled={testing[p.id]}
-                    className="p-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded transition disabled:opacity-50"
-                    title="Test connection"
-                  >
-                    {testing[p.id] ? "⏳" : "🔍"}
-                  </button>
-                  <button
-                    onClick={() => { setEditing({ ...p }); setShowAdd(false); }}
-                    className="p-1.5 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 rounded transition"
-                    title="Edit"
-                  >
-                    ✏️
-                  </button>
-                  <button
-                    onClick={() => deleteProvider(p.id)}
-                    className="p-1.5 text-xs text-zinc-400 hover:text-red-400 hover:bg-zinc-700 rounded transition"
-                    title="Delete"
-                  >
-                    🗑
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {providers.length === 0 && (
-              <div className="text-center py-8 text-zinc-600 text-sm">
-                No providers yet. Click "+ Add Provider" to add one.
+              <div className={`text-center py-12 text-sm ${theme === "light" ? "text-zinc-400" : "text-zinc-600"}`}>
+                {t("providers.empty")}
               </div>
             )}
           </div>
         </div>
 
         {/* Settings */}
-        <div className="border-t border-zinc-800 pt-6">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">Settings</h2>
+        <div className={`border-t pt-5 ${theme === "light" ? "border-zinc-200" : "border-zinc-800"}`}>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-3">{t("settings.title")}</h2>
           <div className="space-y-3 max-w-md">
-            <label className="flex items-center justify-between p-3 rounded-lg border border-zinc-700 bg-zinc-900/50">
+            {/* Auto-start */}
+            <label className={`flex items-center justify-between p-3 rounded-lg border ${theme === "light" ? "border-zinc-200" : "border-zinc-700/50 bg-zinc-900/50"}`}>
               <div>
-                <div className="text-sm font-medium">Auto-start proxy</div>
-                <div className="text-xs text-zinc-500">Launch proxy on app startup</div>
+                <div className="text-sm font-medium">{t("settings.autoStart")}</div>
+                <div className="text-xs text-zinc-500">{t("settings.autoStartDesc")}</div>
               </div>
-              <button
-                onClick={toggleAutoStart}
-                className={`w-10 h-5 rounded-full transition relative ${autoStart ? "bg-blue-600" : "bg-zinc-700"}`}
-              >
+              <button onClick={toggleAutoStart}
+                className={`w-10 h-5 rounded-full transition relative ${autoStart ? "bg-blue-600" : (theme === "light" ? "bg-zinc-300" : "bg-zinc-700")}`}>
                 <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${autoStart ? "left-5" : "left-0.5"}`} />
               </button>
             </label>
+            {/* Codex config toggle */}
+            <button onClick={() => setShowCodexConfig(!showCodexConfig)}
+              className={`text-sm transition ${theme === "light" ? "text-zinc-500 hover:text-zinc-700" : "text-zinc-500 hover:text-zinc-300"}`}>
+              {showCodexConfig ? "▾" : "▸"} {t("settings.codexConfig")}
+            </button>
+            {showCodexConfig && codexConfig && (
+              <pre className={`text-xs rounded-lg p-3 overflow-x-auto font-mono ${theme === "light" ? "bg-zinc-50 border border-zinc-200 text-zinc-600" : "bg-zinc-900 border border-zinc-800 text-zinc-400"}`}>
+                {codexConfig}
+              </pre>
+            )}
           </div>
         </div>
-
-        {/* Codex Config Preview */}
-        {codexConfig && (
-          <div className="border-t border-zinc-800 pt-6 mt-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">Codex Config (~/.codex/config.toml)</h2>
-            <pre className="text-xs bg-zinc-950 border border-zinc-800 rounded-lg p-3 overflow-x-auto text-zinc-400 font-mono">
-              {codexConfig}
-            </pre>
-          </div>
-        )}
       </main>
 
-      {/* Modal: Add/Edit Provider */}
-      {(editing || showAdd) && (
+      {/* Modal: Add with preset selector */}
+      {showAdd && !quickSetup && (
+        <Modal onClose={() => { setShowAdd(false); setEditing(null); }} title={t("modal.addTitle")} theme={theme}>
+          {/* Preset quick-pick */}
+          <div className="mb-4">
+            <label className="text-xs text-zinc-500 mb-2 block">{t("preset.select")}</label>
+            <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto">
+              {BUILTIN_PRESETS.map(p => (
+                <button key={p.id}
+                  onClick={() => openQuickSetup(p.model)}
+                  className={`text-left px-3 py-2 rounded text-xs border transition truncate ${
+                    theme === "light"
+                      ? "border-zinc-200 hover:border-blue-300 hover:bg-blue-50"
+                      : "border-zinc-700 hover:border-blue-600 hover:bg-blue-600/10"
+                  }`}>
+                  <div className="font-medium">{p.label}</div>
+                  <div className="text-zinc-500">{p.model}</div>
+                </button>
+              ))}
+              <button
+                onClick={() => { setQuickSetup("custom"); setEditing(emptyProvider()); }}
+                className={`text-left px-3 py-2 rounded text-xs border transition ${
+                  theme === "light" ? "border-zinc-200 hover:border-zinc-300" : "border-zinc-700 hover:border-zinc-600"
+                }`}>
+                <div className="font-medium">{t("preset.custom")}</div>
+                <div className="text-zinc-500">—</div>
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Modal: Quick key-only or full edit */}
+      {(editing && (quickSetup || showAdd)) && (
         <ProviderEditor
-          provider={editing ?? emptyProvider()}
+          provider={editing}
+          isQuick={quickSetup !== null && quickSetup !== "custom"}
           onSave={saveProvider}
-          onClose={() => { setEditing(null); setShowAdd(false); }}
+          onClose={() => { setEditing(null); setShowAdd(false); setQuickSetup(null); }}
+          theme={theme}
+        />
+      )}
+
+      {/* Modal: Edit existing */}
+      {editing && !showAdd && !quickSetup && (
+        <ProviderEditor
+          provider={editing}
+          isQuick={false}
+          onSave={saveProvider}
+          onClose={() => setEditing(null)}
+          theme={theme}
         />
       )}
     </div>
   );
 }
 
-function ProviderEditor({ provider, onSave, onClose }: {
-  provider: Provider;
-  onSave: (p: Provider) => void;
-  onClose: () => void;
+function Modal({ children, onClose, title, theme }: {
+  children: React.ReactNode; onClose: () => void; title: string; theme: string;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className={`rounded-xl p-5 w-full max-w-md mx-4 ${theme === "light" ? "bg-white border border-zinc-200" : "bg-zinc-900 border border-zinc-700"}`}
+        onClick={e => e.stopPropagation()}>
+        <h3 className="text-base font-semibold mb-4">{title}</h3>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
+  provider: Provider; isQuick: boolean; onSave: (p: Provider) => void; onClose: () => void; theme: string;
 }) {
   const [form, setForm] = useState({ ...provider });
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-4">{provider.id ? "Edit Provider" : "Add Provider"}</h3>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className={`rounded-xl p-5 w-full max-w-md mx-4 ${theme === "light" ? "bg-white border border-zinc-200" : "bg-zinc-900 border border-zinc-700"}`}
+        onClick={e => e.stopPropagation()}>
+        <h3 className="text-base font-semibold mb-1">
+          {provider.id ? t("modal.editTitle") : t("modal.addTitle")}
+        </h3>
+        {isQuick && (
+          <p className="text-xs text-emerald-500 mb-3">{t("modal.quickSetup")}: {t("modal.apiKeyOnly")}</p>
+        )}
+
         <div className="space-y-3">
-          <Field label="Display Name" value={form.name} onChange={v => setForm(f => ({ ...f, name: v }))} />
-          <Field label="Model Slug" value={form.model} onChange={v => setForm(f => ({ ...f, model: v }))}
-            placeholder="e.g. glm-5.2, kimi-for-coding" />
-          <Field label="Upstream URL" value={form.upstream} onChange={v => setForm(f => ({ ...f, upstream: v }))}
-            placeholder="https://api.kimi.com/coding/v1" />
-          <Field label="API Key" value={form.api_key} onChange={v => setForm(f => ({ ...f, api_key: v }))} type="password"
-            placeholder="sk-..." />
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Context Window" value={String(form.context_window)}
-              onChange={v => setForm(f => ({ ...f, context_window: Number(v) || 262144 }))} />
-            <Field label="Max Output Tokens" value={String(form.max_output_tokens)}
-              onChange={v => setForm(f => ({ ...f, max_output_tokens: Number(v) || 32768 }))} />
-          </div>
+          {!isQuick && (
+            <>
+              <Field label={t("field.name")} value={form.name} onChange={v => setForm(f => ({ ...f, name: v }))} theme={theme} />
+              <Field label={t("field.model")} value={form.model} onChange={v => setForm(f => ({ ...f, model: v }))} theme={theme} />
+              <Field label={t("field.upstream")} value={form.upstream} onChange={v => setForm(f => ({ ...f, upstream: v }))} theme={theme} />
+            </>
+          )}
+          {isQuick && (
+            <div className={`p-2 rounded text-xs ${theme === "light" ? "bg-zinc-50" : "bg-zinc-800"}`}>
+              <span className="font-medium">{form.name}</span>
+              <span className="text-zinc-500 mx-2">→</span>
+              <code className="text-zinc-500">{form.model}</code>
+            </div>
+          )}
+          <Field label={t("field.apiKey")} value={form.api_key} onChange={v => setForm(f => ({ ...f, api_key: v }))}
+            type="password" placeholder="sk-..." theme={theme} autoFocus={isQuick} />
+          {!isQuick && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={t("field.contextWindow")} value={String(form.context_window)}
+                onChange={v => setForm(f => ({ ...f, context_window: Number(v) || 262144 }))} theme={theme} />
+              <Field label={t("field.maxTokens")} value={String(form.max_output_tokens)}
+                onChange={v => setForm(f => ({ ...f, max_output_tokens: Number(v) || 32768 }))} theme={theme} />
+            </div>
+          )}
         </div>
-        <div className="flex justify-end gap-2 mt-6">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-zinc-400 hover:text-white transition">Cancel</button>
-          <button
-            onClick={() => onSave(form)}
-            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
-          >
-            Save
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose}
+            className={`px-4 py-2 text-sm rounded transition ${theme === "light" ? "text-zinc-500 hover:text-zinc-700" : "text-zinc-400 hover:text-white"}`}>
+            {t("modal.cancel")}
+          </button>
+          <button onClick={() => onSave(form)}
+            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
+            {t("modal.save")}
           </button>
         </div>
       </div>
@@ -285,21 +402,20 @@ function ProviderEditor({ provider, onSave, onClose }: {
   );
 }
 
-function Field({ label, value, onChange, type = "text", placeholder = "" }: {
-  label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string;
+function Field({ label, value, onChange, type = "text", placeholder = "", theme, autoFocus = false }: {
+  label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string; theme: string; autoFocus?: boolean;
 }) {
   return (
     <label className="block">
       <span className="text-xs text-zinc-500 mb-1 block">{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-600 transition"
-      />
+      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} autoFocus={autoFocus}
+        className={`w-full rounded-lg px-3 py-2 text-sm placeholder:text-zinc-400 focus:outline-none focus:border-blue-500 transition ${
+          theme === "light"
+            ? "bg-white border border-zinc-300 text-zinc-900"
+            : "bg-zinc-800 border border-zinc-700 text-white placeholder:text-zinc-600"
+        }`} />
     </label>
   );
 }
 
-export default App;
+export default AppShell;
