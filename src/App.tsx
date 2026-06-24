@@ -30,8 +30,7 @@ function App() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [proxyRunning, setProxyRunning] = useState(false);
   const [proxyPort, setProxyPort] = useState(15731);
-  const [showCodexConfig, setShowCodexConfig] = useState(false);
-  const [codexConfig, setCodexConfig] = useState("");
+  const [codexTest, setCodexTest] = useState<string | null>(null);
   const [editing, setEditing] = useState<Provider | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [quickSetup, setQuickSetup] = useState<string | null>(null); // preset model slug
@@ -48,7 +47,6 @@ function App() {
     const running = await invoke<boolean>("proxy_status");
     setProxyRunning(running);
     try { setProxyPort(await invoke<number>("proxy_port")); } catch {}
-    try { setCodexConfig(await invoke<string>("read_codex_config")); } catch {}
   }, []);
 
   useEffect(() => { refreshProviders(); refreshStatus(); }, [refreshProviders, refreshStatus]);
@@ -79,6 +77,17 @@ function App() {
     }
     setTesting(t => ({ ...t, [p.id]: false }));
   };
+
+  // Sort: connected providers first, then untested, then failed
+  const sortedProviders = [...providers].sort((a, b) => {
+    const sa = testResult[a.id];
+    const sb = testResult[b.id];
+    if (sa === "ok" && sb !== "ok") return -1;
+    if (sa !== "ok" && sb === "ok") return 1;
+    if (sa === "fail" && sb !== "fail") return 1;
+    if (sa !== "fail" && sb === "fail") return -1;
+    return a.sort_index - b.sort_index;
+  });
 
   const applyModel = async (model: string) => {
     await invoke("apply_to_codex", { model });
@@ -176,7 +185,7 @@ function App() {
           </div>
 
           <div className="space-y-2">
-            {providers.map(p => {
+            {sortedProviders.map(p => {
               const hasKey = p.api_key.length > 4;
               const testState = testResult[p.id];
               return (
@@ -236,7 +245,7 @@ function App() {
                 </div>
               );
             })}
-            {providers.length === 0 && (
+            {sortedProviders.length === 0 && (
               <div className={`text-center py-12 text-sm ${theme === "light" ? "text-zinc-400" : "text-zinc-600"}`}>
                 {t("providers.empty")}
               </div>
@@ -259,16 +268,26 @@ function App() {
                 <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${autoStart ? "left-5" : "left-0.5"}`} />
               </button>
             </label>
-            {/* Codex config toggle */}
-            <button onClick={() => setShowCodexConfig(!showCodexConfig)}
-              className={`text-sm transition ${theme === "light" ? "text-zinc-500 hover:text-zinc-700" : "text-zinc-500 hover:text-zinc-300"}`}>
-              {showCodexConfig ? "▾" : "▸"} {t("settings.codexConfig")}
-            </button>
-            {showCodexConfig && codexConfig && (
-              <pre className={`text-xs rounded-lg p-3 overflow-x-auto font-mono ${theme === "light" ? "bg-zinc-50 border border-zinc-200 text-zinc-600" : "bg-zinc-900 border border-zinc-800 text-zinc-400"}`}>
-                {codexConfig}
-              </pre>
-            )}
+            {/* Codex connectivity test */}
+            <div className="mt-3">
+              <button
+                onClick={async () => {
+                  try {
+                    const resp = await fetch("http://127.0.0.1:15731/health");
+                    if (resp.ok) setCodexTest("ok");
+                    else setCodexTest("fail");
+                  } catch { setCodexTest("fail"); }
+                }}
+                className={`px-3 py-1.5 text-sm rounded border transition ${
+                  theme === "light"
+                    ? "border-zinc-200 hover:bg-zinc-50"
+                    : "border-zinc-700 hover:bg-zinc-800"
+                }`}>
+                Test Codex → Proxy Connection
+              </button>
+              {codexTest === "ok" && <span className="ml-2 text-xs text-emerald-500">✓ Codex can reach proxy</span>}
+              {codexTest === "fail" && <span className="ml-2 text-xs text-red-500">✗ Cannot reach proxy — start the proxy first</span>}
+            </div>
           </div>
         </div>
       </main>

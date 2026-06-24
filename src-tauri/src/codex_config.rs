@@ -7,16 +7,23 @@ fn codex_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".codex")
 }
 
+fn catalog_path() -> PathBuf {
+    codex_dir().join("models-catalog.json")
+}
+
 /// Write Codex config.toml to point to the proxy
 pub fn write_codex_config(model: &str, proxy_port: u16, context_window: u64) -> Result<(), String> {
     let dir = codex_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
+    let catalog_abs = catalog_path();
+    let catalog_str = catalog_abs.to_string_lossy().replace('\\', "\\\\");
+
     let config = format!(
         r#"model = "{model}"
 model_provider = "custom"
 model_context_window = {ctx}
-model_catalog_json = "models-catalog.json"
+model_catalog_json = "{catalog}"
 
 [model_providers.custom]
 name = "Coding Plan"
@@ -29,6 +36,7 @@ js_repl = false
 "#,
         model = model,
         ctx = context_window,
+        catalog = catalog_str,
         port = proxy_port
     );
 
@@ -111,44 +119,49 @@ pub fn write_model_catalog(providers: &[Provider]) -> Result<(), String> {
         .collect();
 
     let catalog = json!({"models": models});
-    let path = codex_dir().join("models-catalog.json");
+    let path = catalog_path();
     fs::write(&path, serde_json::to_string_pretty(&catalog).unwrap())
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Test connectivity to a provider's upstream (simple health check)
+/// Test connectivity to a provider's upstream
 pub async fn test_provider_connection(provider: &Provider) -> Result<String, String> {
-    // Check if the upstream URL is reachable
     let url = provider.upstream.trim_end_matches('/').to_string();
-    let output = std::process::Command::new("curl")
-        .arg("-s")
-        .arg("--max-time")
-        .arg("10")
-        .arg("--noproxy")
-        .arg("*")
-        .arg(&format!("{}/messages", url))
-        .arg("-H")
-        .arg(format!("x-api-key: {}", provider.api_key))
-        .arg("-H")
-        .arg("anthropic-version: 2023-06-01")
-        .arg("-H")
-        .arg("content-type: application/json")
-        .arg("-d")
-        .arg(format!(r#"{{"model":"{}","max_tokens":5,"messages":[{{"role":"user","content":"hi"}}]}}"#, provider.model))
-        .output()
-        .map_err(|e| format!("curl not found: {}", e))?;
+    let body = json!({
+        "model": provider.model,
+        "max_tokens": 5,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.arg("-s").arg("--max-time").arg("10").arg("--noproxy").arg("*")
+        .arg(format!("{}/messages", url))
+        .arg("-H").arg(format!("x-api-key: {}", provider.api_key))
+        .arg("-H").arg("anthropic-version: 2023-06-01")
+        .arg("-H").arg("content-type: application/json")
+        .arg("-d").arg(serde_json::to_string(&body).unwrap_or_default());
+
+    // Hide console window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output().map_err(|e| format!("curl error: {}", e))?;
 
     if output.status.success() {
-        let body = String::from_utf8_lossy(&output.stdout);
-        if body.contains("\"type\":\"message\"") || body.contains("\"content\"") {
-            Ok("Connection successful".to_string())
+        let body_str = String::from_utf8_lossy(&output.stdout);
+        if body_str.contains("\"type\":\"message\"") || body_str.contains("\"content\"") {
+            Ok("ok".to_string())
         } else {
-            Err(format!("Unexpected response: {}", body.chars().take(200).collect::<String>()))
+            Err(format!("Unexpected: {}", body_str.chars().take(200).collect::<String>()))
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("Failed: {}", if stderr.is_empty() { stdout } else { stderr }.chars().take(200).collect::<String>()))
+        let msg = if stderr.is_empty() { stdout } else { stderr };
+        Err(msg.chars().take(200).collect())
     }
 }
