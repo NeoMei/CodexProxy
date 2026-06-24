@@ -64,10 +64,10 @@ pub fn read_codex_config() -> Result<String, String> {
     }
 }
 
-/// Generate model catalog JSON for all enabled providers
+/// Generate model catalog JSON for verified providers only
 pub fn write_model_catalog(providers: &[Provider]) -> Result<(), String> {
     let models: Vec<serde_json::Value> = providers.iter()
-        .filter(|p| p.enabled)
+        .filter(|p| p.enabled && p.verified && !p.api_key.is_empty())
         .map(|p| {
             let efforts: Vec<serde_json::Value> = if p.model.contains("deepseek") {
                 vec!["low","medium","high","xhigh"]

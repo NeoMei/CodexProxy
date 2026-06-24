@@ -14,6 +14,7 @@ pub struct Provider {
     pub max_output_tokens: u64,
     pub enabled: bool,
     pub sort_index: i32,
+    pub verified: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,7 +61,8 @@ impl Database {
                 context_window INTEGER NOT NULL DEFAULT 262144,
                 max_output_tokens INTEGER NOT NULL DEFAULT 32768,
                 enabled INTEGER NOT NULL DEFAULT 1,
-                sort_index INTEGER NOT NULL DEFAULT 0
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                verified INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -78,11 +80,16 @@ impl Database {
         ).unwrap_or(0);
         if count == 0 {
             let presets = vec![
-                ("preset-kimi", "Kimi K2.7 Code", "kimi-for-coding", "https://api.kimi.com/coding/v1", 262144, 32768),
-                ("preset-glm", "GLM 5.2", "glm-5.2", "https://open.bigmodel.cn/api/anthropic/v1", 200000, 32768),
-                ("preset-deepseek", "DeepSeek V4 Pro", "deepseek-v4-pro", "https://api.deepseek.com/anthropic/v1", 1000000, 384000),
-                ("preset-volcengine", "Volcengine AgentPlan", "doubao-seed-2.0", "https://ark.cn-beijing.volces.com/api/anthropic/v1", 200000, 32768),
-                ("preset-bailian", "Bailian Coding Plan", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/anthropic/v1", 200000, 32768),
+                ("preset-kimi-cp", "Kimi Coding Plan", "kimi-for-coding", "https://api.kimi.com/coding/v1", 262144, 32768),
+                ("preset-kimi-api", "Kimi API", "kimi-k2.7-code", "https://api.moonshot.cn/anthropic/v1", 262144, 32768),
+                ("preset-glm-cp", "GLM Coding Plan", "glm-5.2", "https://open.bigmodel.cn/api/anthropic/v1", 200000, 32768),
+                ("preset-glm-api", "GLM API", "glm-4.7", "https://open.bigmodel.cn/api/paas/v4", 128000, 4096),
+                ("preset-deepseek-cp", "DeepSeek Coding Plan", "deepseek-v4-pro", "https://api.deepseek.com/anthropic/v1", 1000000, 384000),
+                ("preset-deepseek-api", "DeepSeek API", "deepseek-chat", "https://api.deepseek.com/v1", 131072, 8192),
+                ("preset-volc-cp", "Volcengine AgentPlan", "doubao-seed-2.0", "https://ark.cn-beijing.volces.com/api/anthropic/v1", 200000, 32768),
+                ("preset-volc-api", "Volcengine API", "doubao-1.5-pro-256k", "https://ark.cn-beijing.volces.com/api/v3", 256000, 16384),
+                ("preset-bailian-cp", "Bailian Coding Plan", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/anthropic/v1", 200000, 32768),
+                ("preset-bailian-api", "Bailian API", "qwen-max", "https://dashscope.aliyuncs.com/compatible-mode/v1", 32768, 8192),
                 ("preset-openai", "OpenAI GPT-5.5", "gpt-5.5", "https://api.openai.com/v1", 272000, 128000),
                 ("preset-anthropic", "Claude Opus 4", "claude-opus-4-20250514", "https://api.anthropic.com/v1", 200000, 32768),
                 ("preset-google", "Gemini 2.5 Pro", "gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta", 1048576, 65536),
@@ -101,7 +108,8 @@ impl Database {
     pub fn list_providers(&self) -> Result<Vec<Provider>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, model, upstream, api_key, context_window, max_output_tokens, enabled, sort_index 
+            "SELECT id, name, model, upstream, api_key, context_window, max_output_tokens, enabled, sort_index, 
+                    COALESCE(verified, 0) as verified
              FROM providers ORDER BY sort_index"
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |row| {
@@ -115,6 +123,7 @@ impl Database {
                 max_output_tokens: row.get::<_, i64>(6)? as u64,
                 enabled: row.get::<_, i64>(7)? != 0,
                 sort_index: row.get(8)?,
+                verified: row.get::<_, i64>(9)? != 0,
             })
         }).map_err(|e| e.to_string())?;
         let mut providers = Vec::new();

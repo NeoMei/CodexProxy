@@ -3,6 +3,7 @@ use crate::proxy::SharedProxyManager;
 use crate::codex_config;
 use tauri::State;
 use uuid::Uuid;
+use std::collections::BTreeMap;
 
 #[tauri::command]
 pub fn list_providers(db: State<Database>) -> Result<Vec<Provider>, String> {
@@ -31,10 +32,27 @@ pub async fn test_connection(provider: Provider) -> Result<String, String> {
 
 #[tauri::command]
 pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Result<(), String> {
+    // Write provider config for the Node.js proxy
+    let providers = db.list_providers()?;
+    let config: std::collections::BTreeMap<String, serde_json::Value> = providers.iter()
+        .filter(|p| p.enabled && !p.api_key.is_empty())
+        .map(|p| (p.model.clone(), serde_json::json!({
+            "upstream": p.upstream,
+            "apiKey": p.api_key
+        })))
+        .collect();
+
+    let config_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".coding-plan-proxy.json");
+    let json_str = serde_json::to_string_pretty(&config).unwrap_or_default();
+    std::fs::write(&config_path, &json_str).map_err(|e| format!("Cannot write config: {}", e))?;
+
+    // Start the proxy
     let proxy_path = proxy_path();
     proxy.start(&proxy_path)?;
-    // Update all enabled providers to the proxy config
-    let providers = db.list_providers()?;
+
+    // Write Codex config
     codex_config::write_model_catalog(&providers)?;
     codex_config::write_codex_auth()?;
     let current_model = db.get_setting("current_model").unwrap_or_default();
@@ -89,26 +107,49 @@ pub fn set_setting(db: State<Database>, key: String, value: String) -> Result<()
     db.set_setting(&key, &value)
 }
 
-fn proxy_path() -> String {
-    // In dev: use the proxy directory relative to project root
-    // In production: use the bundled resource
-    let dev_path = std::env::current_dir()
-        .unwrap_or_default()
-        .parent()
-        .map(|p| p.join("proxy").join("index.mjs"))
-        .unwrap_or_default();
-    
-    if dev_path.exists() {
-        return dev_path.to_string_lossy().to_string();
-    }
+#[tauri::command]
+pub fn set_verified(db: State<Database>, id: String, verified: bool) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE providers SET verified = ?1 WHERE id = ?2",
+        rusqlite::params![verified as i64, id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    // Fallback: look next to the executable
+fn proxy_path() -> String {
+    // Production: bundled resource next to the executable
     if let Ok(exe) = std::env::current_exe() {
-        let bundled = exe.parent().unwrap_or(std::path::Path::new(".")).join("proxy").join("index.mjs");
-        if bundled.exists() {
-            return bundled.to_string_lossy().to_string();
+        if let Some(parent) = exe.parent() {
+            let candidates = [
+                parent.join("proxy").join("index.mjs"),
+                parent.parent().map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
+                parent.parent().and_then(|p| p.parent()).map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
+            ];
+            for c in &candidates {
+                if c.exists() { return c.to_string_lossy().to_string(); }
+            }
         }
     }
 
+    // Dev: common locations relative to CWD
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let dev_candidates = [
+        cwd.join("proxy").join("index.mjs"),
+        cwd.join("coding-plan-tauri").join("proxy").join("index.mjs"),
+        cwd.parent().map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
+    ];
+    for c in &dev_candidates {
+        if c.exists() { return c.to_string_lossy().to_string(); }
+    }
+
+    // Hardcoded dev fallback
+    let fallback = dirs::home_dir()
+        .unwrap_or_default()
+        .join("AppData").join("Roaming").join("reasonix").join("global-workspace")
+        .join("coding-plan-tauri").join("proxy").join("index.mjs");
+    if fallback.exists() { return fallback.to_string_lossy().to_string(); }
+
+    log::error!("Proxy index.mjs not found at any known location");
     "proxy/index.mjs".to_string()
 }

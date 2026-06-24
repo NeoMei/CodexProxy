@@ -14,6 +14,7 @@ interface Provider {
   max_output_tokens: number;
   enabled: boolean;
   sort_index: number;
+  verified: boolean;
 }
 
 function AppShell() {
@@ -72,10 +73,13 @@ function App() {
     try {
       await invoke<string>("test_connection", { provider: p });
       setTestResult(t => ({ ...t, [p.id]: "ok" }));
+      await invoke("set_verified", { id: p.id, verified: true });
     } catch (e: any) {
       setTestResult(t => ({ ...t, [p.id]: "fail" }));
+      await invoke("set_verified", { id: p.id, verified: false });
     }
     setTesting(t => ({ ...t, [p.id]: false }));
+    refreshProviders();
   };
 
   // Sort: connected providers first, then untested, then failed
@@ -118,7 +122,7 @@ function App() {
       setEditing({
         id: "", name: preset.name, model: preset.model, upstream: preset.upstream,
         api_key: "", context_window: preset.contextWindow, max_output_tokens: preset.maxOutputTokens,
-        enabled: true, sort_index: 0,
+        enabled: true, sort_index: 0, verified: false,
       });
     }
     setQuickSetup(model);
@@ -127,7 +131,7 @@ function App() {
 
   const emptyProvider = (): Provider => ({
     id: "", name: "", model: "", upstream: "", api_key: "",
-    context_window: 262144, max_output_tokens: 32768, enabled: true, sort_index: 0,
+    context_window: 262144, max_output_tokens: 32768, enabled: true, sort_index: 0, verified: false,
   });
 
   return (

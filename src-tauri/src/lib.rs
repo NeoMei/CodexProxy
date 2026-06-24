@@ -67,6 +67,7 @@ pub fn run() {
             commands::proxy_port,
             commands::apply_to_codex,
             commands::read_codex_config,
+            commands::set_verified,
             commands::get_setting,
             commands::set_setting,
         ])

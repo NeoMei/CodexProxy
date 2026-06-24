@@ -46,23 +46,9 @@ function loadProviders() {
   }
   if (Object.keys(envProviders).length > 0) return envProviders;
 
-  // 4. Fallback: demo mode (shows setup instructions)
-  console.error("");
-  console.error("⚠ No providers configured.");
-  console.error("");
-  console.error("Set providers via one of:");
-  console.error("  1. Env var: CODING_PLAN_PROVIDERS='{...}'");
-  console.error("  2. Config file: ~/.coding-plan-proxy.json");
-  console.error("  3. Per-provider env: CODING_PLAN_KIMI='kimi-for-coding|https://api.kimi.com/coding/v1|sk-...'");
-  console.error("");
-  console.error("Example ~/.coding-plan-proxy.json:");
-  console.error(JSON.stringify({
-    "kimi-for-coding": { upstream: "https://api.kimi.com/coding/v1", apiKey: "sk-kimi-..." },
-    "glm-5.2": { upstream: "https://open.bigmodel.cn/api/anthropic/v1", apiKey: "your-glm-key" },
-    "deepseek-v4-pro": { upstream: "https://api.deepseek.com/anthropic/v1", apiKey: "sk-..." }
-  }, null, 2));
-  console.error("");
-  process.exit(1);
+  // 4. Fallback: empty — proxy will return errors per-request until configured
+  console.error("[coding-plan-proxy] No providers configured. Use the desktop app or set CODING_PLAN_PROVIDERS env var.");
+  return {};
 }
 
 const PROVIDERS = loadProviders();

@@ -16,9 +16,17 @@ impl ProxyManager {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(ref mut child) = *guard {
                 match child.try_wait() {
-                    Ok(Some(_)) => { *guard = None; false }
+                    Ok(Some(status)) => {
+                        log::warn!("Proxy exited with status: {:?}", status.code());
+                        *guard = None;
+                        false
+                    }
                     Ok(None) => true,
-                    Err(_) => { *guard = None; false }
+                    Err(e) => {
+                        log::warn!("Proxy wait error: {}", e);
+                        *guard = None;
+                        false
+                    }
                 }
             } else { false }
         } else { false }
@@ -29,10 +37,20 @@ impl ProxyManager {
     pub fn start(&self, proxy_path: &str) -> Result<(), String> {
         if self.is_running() { return Ok(()); }
 
-        let child = Command::new("node")
-            .arg(proxy_path)
-            .env("PROXY_PORT", self.port.to_string())
-            .spawn()
+        log::info!("Starting proxy: node {}", proxy_path);
+
+        let mut cmd = Command::new("node");
+        cmd.arg(proxy_path)
+            .env("PROXY_PORT", self.port.to_string());
+
+        // Hide console window on Windows
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        let child = cmd.spawn()
             .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
         if let Ok(mut guard) = self.child.lock() {
