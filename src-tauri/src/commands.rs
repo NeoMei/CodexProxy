@@ -33,9 +33,12 @@ pub async fn test_connection(provider: Provider) -> Result<String, String> {
 #[tauri::command]
 pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Result<(), String> {
     // Write provider config for the Node.js proxy
-    let providers = db.list_providers()?;
-    let config: std::collections::BTreeMap<String, serde_json::Value> = providers.iter()
+    let providers = db.list_providers().map_err(|e| format!("DB error: {}", e))?;
+    let enabled_providers: Vec<&Provider> = providers.iter()
         .filter(|p| p.enabled && !p.api_key.is_empty())
+        .collect();
+
+    let config: BTreeMap<String, serde_json::Value> = enabled_providers.iter()
         .map(|p| (p.model.clone(), serde_json::json!({
             "upstream": p.upstream,
             "apiKey": p.api_key
@@ -45,22 +48,26 @@ pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Res
     let config_path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".coding-plan-proxy.json");
-    let json_str = serde_json::to_string_pretty(&config).unwrap_or_default();
-    std::fs::write(&config_path, &json_str).map_err(|e| format!("Cannot write config: {}", e))?;
+    let json_str = serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string());
+    std::fs::write(&config_path, &json_str).map_err(|e| format!("Cannot write proxy config: {}", e))?;
 
-    // Start the proxy
+    // Start the proxy (returns error if node not found)
     let proxy_path = proxy_path();
     proxy.start(&proxy_path)?;
 
-    // Write Codex config
-    codex_config::write_model_catalog(&providers)?;
-    codex_config::write_codex_auth()?;
-    let current_model = db.get_setting("current_model").unwrap_or_default();
-    let model = if current_model.is_empty() {
-        providers.first().map(|p| p.model.clone()).unwrap_or_default()
-    } else { current_model };
-    let ctx = providers.iter().find(|p| p.model == model).map(|p| p.context_window).unwrap_or(262144);
-    codex_config::write_codex_config(&model, proxy.port(), ctx)?;
+    // Write Codex config only if we have verified providers
+    let verified: Vec<&Provider> = providers.iter().filter(|p| p.verified).collect();
+    if !verified.is_empty() {
+        codex_config::write_model_catalog(&providers).map_err(|e| format!("Catalog: {}", e))?;
+        codex_config::write_codex_auth().map_err(|e| format!("Auth: {}", e))?;
+        let current_model = db.get_setting("current_model").unwrap_or_default();
+        let model = if current_model.is_empty() {
+            verified.first().map(|p| p.model.clone()).unwrap_or_default()
+        } else { current_model };
+        let ctx = verified.iter().find(|p| p.model == model).map(|p| p.context_window).unwrap_or(262144);
+        codex_config::write_codex_config(&model, proxy.port(), ctx).map_err(|e| format!("Config: {}", e))?;
+    }
+
     Ok(())
 }
 

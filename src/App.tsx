@@ -38,6 +38,7 @@ function App() {
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [autoStart, setAutoStart] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
 
   const refreshProviders = useCallback(async () => {
     const list = await invoke<Provider[]>("list_providers");
@@ -63,9 +64,18 @@ function App() {
   const switchLocale = (l: string) => { setLoc(l); setLocale(l); };
 
   const toggleProxy = async () => {
-    if (proxyRunning) await invoke("stop_proxy");
-    else await invoke("start_proxy");
-    refreshStatus();
+    try {
+      if (proxyRunning) {
+        await invoke("stop_proxy");
+        setStatusMsg("");
+      } else {
+        await invoke("start_proxy");
+        setStatusMsg("");
+      }
+      refreshStatus();
+    } catch (e: any) {
+      setStatusMsg(String(e));
+    }
   };
 
   const testProvider = async (p: Provider) => {
@@ -148,6 +158,9 @@ function App() {
             <span className={`w-2 h-2 rounded-full ${proxyRunning ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"}`} />
             {proxyRunning ? `${t("proxy.running")} :${proxyPort}` : t("proxy.stopped")}
           </span>
+          {statusMsg && (
+            <span className="ml-2 text-xs text-red-500 max-w-xs truncate">{statusMsg}</span>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           {/* Locale toggle */}
