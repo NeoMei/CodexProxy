@@ -131,7 +131,7 @@ pub fn write_model_catalog(providers: &[Provider]) -> Result<(), String> {
 /// Test connectivity to a provider's upstream
 pub async fn test_provider_connection(provider: &Provider) -> Result<String, String> {
     let url = provider.upstream.trim_end_matches('/').to_string();
-    let is_chat = url.contains("/v1") && !url.contains("/anthropic");
+    let is_chat = !url.contains("/anthropic");
     
     let body = if is_chat {
         serde_json::json!({"model": provider.model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})

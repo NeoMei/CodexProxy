@@ -42,7 +42,7 @@ pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Res
 
     let config: BTreeMap<String, serde_json::Value> = enabled_providers.iter()
         .map(|p| {
-            let is_chat = p.upstream.contains("/v1") && !p.upstream.contains("/anthropic");
+            let is_chat = !p.upstream.contains("/anthropic");
             (p.model.clone(), serde_json::json!({
                 "upstream": p.upstream,
                 "apiKey": p.api_key,
@@ -103,7 +103,7 @@ pub fn apply_to_codex(db: State<Database>, proxy: State<SharedProxyManager>, mod
     // Write proxy config with ALL verified providers (so proxy supports them all)
     let config: BTreeMap<String, serde_json::Value> = verified.iter()
         .map(|p| {
-            let is_chat = p.upstream.contains("/v1") && !p.upstream.contains("/anthropic");
+            let is_chat = !p.upstream.contains("/anthropic");
             (p.model.clone(), serde_json::json!({"upstream": p.upstream, "apiKey": p.api_key, "protocol": if is_chat { "chat" } else { "anthropic" }}))
         })
         .collect();

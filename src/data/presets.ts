@@ -39,7 +39,7 @@ export const BUILTIN_PRESETS: Preset[] = [
     id: "preset-glm-api",
     name: "GLM API",
     model: "glm-4.7",
-    upstream: "https://open.bigmodel.cn/api/paas/v4",
+    upstream: "https://open.bigmodel.cn/api/anthropic/v1",
     contextWindow: 128000, maxOutputTokens: 4096,
     label: "GLM API (智谱)",
   },
