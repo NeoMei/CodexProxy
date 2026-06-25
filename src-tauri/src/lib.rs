@@ -38,10 +38,21 @@ pub fn run() {
                 }
             }
 
-            // Tray icon — single click toggles window
+            // Tray icon — left click toggles window, right click menu with Exit
             use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            
+            let quit_item = MenuItemBuilder::with_id("quit", "Exit").build(app)?;
+            let tray_menu = MenuBuilder::new(app).item(&quit_item).build()?;
+            
             let _tray = TrayIconBuilder::new()
+                .menu(&tray_menu)
                 .tooltip("Coding Plan Proxy")
+                .on_menu_event(move |app, event| {
+                    if event.id() == "quit" {
+                        app.exit(0);
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
                         let app = tray.app_handle();

@@ -23,11 +23,6 @@
         "center": true
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.ico",
-      "tooltip": "Coding Plan Proxy",
-      "showMenuOnLeftClick": false
-    },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     }
