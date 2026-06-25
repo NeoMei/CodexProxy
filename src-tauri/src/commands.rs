@@ -141,9 +141,19 @@ pub fn set_setting(db: State<Database>, key: String, value: String) -> Result<()
 #[tauri::command]
 pub fn set_verified(db: State<Database>, id: String, verified: bool) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Sort index: verified come first (0-999), unverified get high numbers
+    let sort_idx: i32 = if verified {
+        // Count existing verified and place after them
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM providers WHERE verified = 1 AND id != ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        count
+    } else { 999 };
     conn.execute(
-        "UPDATE providers SET verified = ?1 WHERE id = ?2",
-        rusqlite::params![verified as i64, id],
+        "UPDATE providers SET verified = ?1, sort_index = ?2 WHERE id = ?3",
+        rusqlite::params![verified as i64, sort_idx, id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }

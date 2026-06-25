@@ -109,16 +109,7 @@ function App() {
     setTimeout(() => setStatusMsg(""), 3000);
   };
 
-  // Sort: connected providers first, then untested, then failed
-  const sortedProviders = [...providers].sort((a, b) => {
-    const sa = testResult[a.id];
-    const sb = testResult[b.id];
-    if (sa === "ok" && sb !== "ok") return -1;
-    if (sa !== "ok" && sb === "ok") return 1;
-    if (sa === "fail" && sb !== "fail") return 1;
-    if (sa !== "fail" && sb === "fail") return -1;
-    return a.sort_index - b.sort_index;
-  });
+  const sortedProviders = [...providers].sort((a, b) => a.sort_index - b.sort_index);
 
   const hasKeys = providers.some(p => p.api_key.length > 4);
 
