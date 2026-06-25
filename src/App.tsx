@@ -130,6 +130,25 @@ function App() {
   const saveProvider = async (p: Provider) => {
     if (!p.id) p.id = await invoke<string>("generate_id");
     await invoke("save_provider", { provider: p });
+    
+    // Batch save if we fetched multiple models
+    const batch = (p as any)._batch_models;
+    if (batch && batch.length > 1) {
+      const all = [];
+      for (const m of batch) {
+        if (m.id === p.model) continue; // already saved the selected one
+        all.push({
+          ...p,
+          id: await invoke("generate_id"),
+          model: m.id,
+          context_window: (m as any).context_length || p.context_window,
+          max_output_tokens: (m as any).max_tokens || p.max_output_tokens,
+          verified: false,
+        });
+      }
+      if (all.length > 0) await invoke("save_providers", { providers: all });
+    }
+    
     setEditing(null); setShowAdd(false); setQuickSetup(null);
     refreshProviders();
   };
@@ -501,22 +520,12 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
             className={`px-4 py-2 text-sm rounded transition ${theme === "light" ? "text-zinc-500 hover:text-zinc-700" : "text-zinc-400 hover:text-white"}`}>
             {t("modal.cancel")}
           </button>
-          <button onClick={async () => {
+          <button onClick={() => {
             if (fetchedModels.length > 1) {
-              const all = fetchedModels.map(m => ({
-                ...form,
-                id: await invoke("generate_id"),
-                model: m.id,
-                context_window: (m as any).context_length || form.context_window,
-                max_output_tokens: (m as any).max_tokens || form.max_output_tokens,
-                verified: false,
-              }));
-              await invoke("save_providers", { providers: all });
-              setEditing(null); setShowAdd(false); setQuickSetup(null);
-              await refreshProviders();
-            } else {
-              await onSave(form);
+              // Pass fetched models through form for batch save
+              (form as any)._batch_models = fetchedModels;
             }
+            onSave(form);
           }}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
             {t("modal.save")}
