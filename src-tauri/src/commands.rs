@@ -161,7 +161,7 @@ pub fn set_verified(db: State<Database>, id: String, verified: bool) -> Result<(
 }
 
 #[tauri::command]
-pub fn fetch_models(upstream: String, api_key: String) -> Result<Vec<String>, String> {
+pub fn fetch_models(upstream: String, api_key: String) -> Result<serde_json::Value, String> {
     let base = upstream.trim_end_matches('/');
     let url = format!("{base}/models");
     
@@ -176,17 +176,28 @@ pub fn fetch_models(upstream: String, api_key: String) -> Result<Vec<String>, St
     let output = cmd.output().map_err(|e| format!("curl: {e}"))?;
     let body = String::from_utf8_lossy(&output.stdout).to_string();
     
+    if body.trim().is_empty() {
+        return Err("Endpoint does not support model listing. Use preset or enter model ID manually.".into());
+    }
+    
     let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|_| format!("Invalid JSON: {}", &body[..body.len().min(200)]))?;
+        .map_err(|_| format!("Invalid response: {}", &body[..body.len().min(200)]))?;
     
-    let models: Vec<String> = json["data"].as_array()
-        .ok_or_else(|| format!("No data array: {}", &body[..body.len().min(200)]))?
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(String::from))
-        .collect();
+    let data = json["data"].as_array()
+        .ok_or_else(|| "No 'data' array in response — endpoint may not support model listing".to_string())?;
     
-    if models.is_empty() { Err("No models found".into()) }
-    else { Ok(models) }
+    if data.is_empty() { return Err("No models found".into()); }
+    
+    // Return enriched: { models: [{id, name, context_length?}], ... }
+    let models: Vec<serde_json::Value> = data.iter().map(|m| {
+        serde_json::json!({
+            "id": m["id"].as_str().unwrap_or(""),
+            "name": m["display_name"].as_str().unwrap_or(m["id"].as_str().unwrap_or("")),
+            "context_length": m["context_length"].as_u64().unwrap_or(0),
+        })
+    }).collect();
+    
+    Ok(serde_json::json!({"models": models}))
 }
 
 fn proxy_path() -> String {

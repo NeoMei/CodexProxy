@@ -407,23 +407,29 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
 }) {
   const [form, setForm] = useState({ ...provider });
   const [fetching, setFetching] = useState(false);
-  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchedModels, setFetchedModels] = useState<{id:string,name:string,context_length:number}[]>([]);
   const [fetchMsg, setFetchMsg] = useState("");
 
   const fetchModels = async () => {
     if (!form.upstream || !form.api_key || form.api_key.length < 4) {
-      setFetchMsg("Enter API key first");
+      setFetchMsg(t("providers.enterKeyFirst"));
       return;
     }
     setFetching(true);
-    setFetchMsg("Fetching...");
+    setFetchMsg(t("providers.fetching"));
     try {
-      const models = await invoke<string[]>("fetch_models", { upstream: form.upstream, apiKey: form.api_key });
+      const result: any = await invoke("fetch_models", { upstream: form.upstream, apiKey: form.api_key });
+      const models = result.models || [];
       setFetchedModels(models);
-      setFetchMsg(`Found ${models.length} models`);
-      if (models.length === 1) setForm(f => ({ ...f, model: models[0] }));
+      setFetchMsg(t("providers.foundModels").replace("{n}", String(models.length)));
+      if (models.length === 1) {
+        setForm(f => ({ ...f, model: models[0].id, name: models[0].name }));
+        if (models[0].context_length > 0) {
+          setForm(f => ({ ...f, context_window: models[0].context_length }));
+        }
+      }
     } catch (e: any) {
-      setFetchMsg(String(e).slice(0, 100));
+      setFetchMsg(String(e).slice(0, 120));
     }
     setFetching(false);
   };
@@ -462,17 +468,19 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
               className={`px-3 py-1 text-xs rounded border transition ${
                 theme === "light" ? "border-zinc-200 hover:bg-zinc-50" : "border-zinc-600 hover:bg-zinc-700"
               } disabled:opacity-50`}>
-              {fetching ? "⏳" : "📡"} Fetch Models
+              {fetching ? "⏳" : "📡"} {t("providers.fetchModels")}
             </button>
-            {fetchMsg && <span className={`text-xs ${fetchMsg.startsWith("Found") ? "text-emerald-500" : fetchMsg.startsWith("Enter") ? "text-zinc-500" : "text-red-400"}`}>{fetchMsg}</span>}
+            {fetchMsg && <span className={`text-xs ${fetchMsg.includes(t("providers.foundModels").replace("{n}","")) || fetchMsg.startsWith("找到") || fetchMsg.startsWith("Found") ? "text-emerald-500" : fetchMsg === t("providers.enterKeyFirst") ? "text-zinc-500" : "text-red-400"}`}>{fetchMsg}</span>}
           </div>
           {/* Model selector from fetched models */}
           {fetchedModels.length > 0 && (
-            <div className={`max-h-32 overflow-y-auto border rounded p-2 ${theme === "light" ? "border-zinc-200" : "border-zinc-700"}`}>
+            <div className={`max-h-40 overflow-y-auto border rounded p-2 ${theme === "light" ? "border-zinc-200" : "border-zinc-700"}`}>
               {fetchedModels.map(m => (
-                <label key={m} className={`flex items-center gap-2 py-0.5 text-xs cursor-pointer ${theme === "light" ? "hover:bg-zinc-50" : "hover:bg-zinc-800"}`}>
-                  <input type="radio" name="model" checked={form.model === m} onChange={() => setForm(f => ({ ...f, model: m }))} />
-                  <code className="text-zinc-500">{m}</code>
+                <label key={m.id} className={`flex items-center gap-2 py-0.5 text-xs cursor-pointer ${theme === "light" ? "hover:bg-zinc-50" : "hover:bg-zinc-800"}`}>
+                  <input type="radio" name="model" checked={form.model === m.id} onChange={() => setForm(f => ({ ...f, model: m.id, name: m.name, context_window: m.context_length || f.context_window }))} />
+                  <span>{m.name}</span>
+                  <code className="text-zinc-500">{m.id}</code>
+                  {m.context_length > 0 && <span className="text-zinc-500">{Math.round(m.context_length/1000)}k ctx</span>}
                 </label>
               ))}
             </div>
