@@ -118,7 +118,13 @@ function App() {
   const hasKeys = providers.some(p => p.api_key.length > 4);
 
   const applyModel = async (model: string) => {
-    await invoke("apply_to_codex", { model });
+    try {
+      await invoke("apply_to_codex", { model });
+      setStatusMsg(`✓ Applied ${model} to Codex. Restart Codex to see model list.`);
+      setTimeout(() => setStatusMsg(""), 5000);
+    } catch (e: any) {
+      setStatusMsg(`Apply failed: ${String(e)}`);
+    }
     refreshStatus();
   };
 
