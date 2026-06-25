@@ -98,6 +98,7 @@ function App() {
       await invoke<string>("test_connection", { provider: p });
       setTestResult(t => ({ ...t, [p.id]: "ok" }));
       await invoke("set_verified", { id: p.id, verified: true });
+      await invoke("rebuild_tray_menu");
       setStatusMsg(`✓ ${p.name}: connected`);
     } catch (e: any) {
       setTestResult(t => ({ ...t, [p.id]: "fail" }));
@@ -117,6 +118,7 @@ function App() {
     try {
       await invoke("apply_to_codex", { model });
       setCurrentModel(model);
+      await invoke("rebuild_tray_menu");
       setStatusMsg(`✓ Active model: ${model}`);
       setTimeout(() => setStatusMsg(""), 5000);
     } catch (e: any) {
