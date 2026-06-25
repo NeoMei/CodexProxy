@@ -194,6 +194,7 @@ async function handleResponses(req, res) {
     headers["Authorization"] = `Bearer ${provider.apiKey}`;
     upstreamBody = responsesToChat(body);
     if (stream) upstreamBody.stream = true;
+    if (body.temperature != null) upstreamBody.temperature = body.temperature;
   } else {
     headers["x-api-key"] = provider.apiKey;
     headers["anthropic-version"] = "2023-06-01";
