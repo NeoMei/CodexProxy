@@ -503,20 +503,17 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
           </button>
           <button onClick={async () => {
             if (fetchedModels.length > 1) {
-              const all = [];
-              for (const m of fetchedModels) {
-                all.push({
-                  ...form,
-                  id: await invoke("generate_id"),
-                  model: m.id,
-                  context_window: (m as any).context_length || form.context_window,
-                  max_output_tokens: (m as any).max_tokens || form.max_output_tokens,
-                  verified: false,
-                });
-              }
+              const all = fetchedModels.map(m => ({
+                ...form,
+                id: await invoke("generate_id"),
+                model: m.id,
+                context_window: (m as any).context_length || form.context_window,
+                max_output_tokens: (m as any).max_tokens || form.max_output_tokens,
+                verified: false,
+              }));
               await invoke("save_providers", { providers: all });
-              // Force refresh of the main provider list
-              await onSave(form);
+              setEditing(null); setShowAdd(false); setQuickSetup(null);
+              await refreshProviders();
             } else {
               await onSave(form);
             }
