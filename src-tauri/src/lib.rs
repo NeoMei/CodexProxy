@@ -69,7 +69,7 @@ pub fn run() {
                                 let proxy = app_handle.state::<SharedProxyManager>();
                                 if proxy.is_running() { let _ = proxy.stop(); }
                                 else {
-                                    let db = app_handle.state::<Database>();
+                                    let _db = app_handle.state::<Database>();
                                     if let Ok(proxy_path) = find_proxy_path(&app_handle) {
                                         let _ = proxy.start(&proxy_path);
                                     }
@@ -77,7 +77,7 @@ pub fn run() {
                             }
                             id if id.starts_with("model:") => {
                                 let model = id.strip_prefix("model:").unwrap_or("").to_string();
-                                let db = app_handle.state::<Database>();
+                                let _db = app_handle.state::<Database>();
                                 let proxy = app_handle.state::<SharedProxyManager>();
                                 if let Ok(providers) = db.list_providers() {
                                     // Update proxy config with all verified providers
