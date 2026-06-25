@@ -11,19 +11,15 @@ fn catalog_file() -> PathBuf {
     codex_dir().join("models-catalog.json")
 }
 
-/// Write Codex config.toml to point to the proxy
-pub fn write_codex_config(model: &str, proxy_port: u16, context_window: u64) -> Result<(), String> {
+/// Write Codex config.toml to point to the proxy with model mappings
+pub fn write_codex_config(model: &str, proxy_port: u16, context_window: u64, verified_providers: &[Provider]) -> Result<(), String> {
     let dir = codex_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let catalog_abs = catalog_file();
-    let catalog_path = catalog_abs.to_string_lossy().to_string();
 
     let config = format!(
         r#"model = "{model}"
 model_provider = "custom"
 model_context_window = {ctx}
-model_catalog_json = '{catalog}'
 
 [model_providers.custom]
 name = "Coding Plan"
@@ -31,13 +27,20 @@ wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:{port}/v1"
 
+[model_providers.custom.models]
+{models_toml}
+
 [features]
 js_repl = false
 "#,
         model = model,
         ctx = context_window,
-        catalog = catalog_path,
-        port = proxy_port
+        port = proxy_port,
+        models_toml = verified_providers.iter()
+            .filter(|p| p.verified && !p.api_key.is_empty())
+            .map(|p| format!("\"{}\" = \"{}\"", p.model, p.model))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     fs::write(dir.join("config.toml"), &config).map_err(|e| e.to_string())?;

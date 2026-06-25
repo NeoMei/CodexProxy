@@ -65,7 +65,7 @@ pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Res
             verified.first().map(|p| p.model.clone()).unwrap_or_default()
         } else { current_model };
         let ctx = verified.iter().find(|p| p.model == model).map(|p| p.context_window).unwrap_or(262144);
-        codex_config::write_codex_config(&model, proxy.port(), ctx).map_err(|e| format!("Config: {}", e))?;
+        codex_config::write_codex_config(&model, proxy.port(), ctx, &providers).map_err(|e| format!("Config: {}", e))?;
     }
 
     Ok(())
@@ -92,7 +92,7 @@ pub fn apply_to_codex(db: State<Database>, proxy: State<SharedProxyManager>, mod
     let provider = providers.iter().find(|p| p.model == model)
         .ok_or_else(|| format!("Model not found: {}", model))?;
     
-    codex_config::write_codex_config(&provider.model, proxy.port(), provider.context_window)?;
+    codex_config::write_codex_config(&provider.model, proxy.port(), provider.context_window, &providers)?;
     codex_config::write_model_catalog(&providers)?;
     codex_config::write_codex_auth()?;
     db.set_setting("current_model", &model)?;
