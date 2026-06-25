@@ -88,14 +88,38 @@ pub fn proxy_port(proxy: State<SharedProxyManager>) -> Result<u16, String> {
 
 #[tauri::command]
 pub fn apply_to_codex(db: State<Database>, proxy: State<SharedProxyManager>, model: String) -> Result<(), String> {
-    let providers = db.list_providers()?;
-    let provider = providers.iter().find(|p| p.model == model)
+    let all_providers = db.list_providers()?;
+    let verified: Vec<&Provider> = all_providers.iter().filter(|p| p.verified && !p.api_key.is_empty()).collect();
+    
+    let provider = all_providers.iter().find(|p| p.model == model)
         .ok_or_else(|| format!("Model not found: {}", model))?;
     
-    codex_config::write_codex_config(&provider.model, proxy.port(), provider.context_window, &providers)?;
-    codex_config::write_model_catalog(&providers)?;
+    // Write proxy config with ALL verified providers (so proxy supports them all)
+    let config: BTreeMap<String, serde_json::Value> = verified.iter()
+        .map(|p| (p.model.clone(), serde_json::json!({"upstream": p.upstream, "apiKey": p.api_key})))
+        .collect();
+    let config_path = dirs::home_dir().unwrap_or_default().join(".coding-plan-proxy.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default())
+        .map_err(|e| format!("Cannot write proxy config: {}", e))?;
+    
+    // Restart proxy to pick up new config (if it was running)
+    let was_running = proxy.is_running();
+    if was_running {
+        proxy.stop()?;
+    }
+    
+    // Write Codex config with selected model
+    codex_config::write_codex_config(&provider.model, proxy.port(), provider.context_window, &all_providers)?;
+    codex_config::write_model_catalog(&all_providers)?;
     codex_config::write_codex_auth()?;
     db.set_setting("current_model", &model)?;
+    
+    // Restart proxy
+    if was_running {
+        let proxy_path = proxy_path();
+        proxy.start(&proxy_path)?;
+    }
+    
     Ok(())
 }
 

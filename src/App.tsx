@@ -39,6 +39,7 @@ function App() {
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [autoStart, setAutoStart] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [currentModel, setCurrentModel] = useState("");
 
   const refreshProviders = useCallback(async () => {
     const list = await invoke<Provider[]>("list_providers");
@@ -58,6 +59,10 @@ function App() {
   }, [refreshStatus]);
 
   useEffect(() => {
+    invoke<string>("read_codex_config").then(cfg => {
+      const m = cfg.match(/^model\s*=\s*"([^"]+)"/m);
+      if (m) setCurrentModel(m[1]);
+    }).catch(() => {});
     invoke<string>("get_setting", { key: "auto_start" }).then(v => setAutoStart(v === "true")).catch(() => {});
   }, []);
 
@@ -120,7 +125,8 @@ function App() {
   const applyModel = async (model: string) => {
     try {
       await invoke("apply_to_codex", { model });
-      setStatusMsg(`✓ Applied ${model} to Codex. Restart Codex to see model list.`);
+      setCurrentModel(model);
+      setStatusMsg(`✓ Active model: ${model}`);
       setTimeout(() => setStatusMsg(""), 5000);
     } catch (e: any) {
       setStatusMsg(`Apply failed: ${String(e)}`);
@@ -246,6 +252,9 @@ function App() {
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-sm">{p.name}</span>
                       <code className={`text-xs px-1.5 py-0.5 rounded ${theme === "light" ? "bg-zinc-100 text-zinc-500" : "bg-zinc-800 text-zinc-400"}`}>{p.model}</code>
+                      {p.model === currentModel && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400 border border-emerald-600/30">✓ Active</span>
+                      )}
                       <span className={`text-xs ${hasKey ? "text-emerald-500" : "text-amber-500"}`}>
                         {hasKey ? t("providers.keySet") : t("providers.keyMissing")}
                       </span>
