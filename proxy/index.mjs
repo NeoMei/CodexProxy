@@ -252,6 +252,35 @@ function buildToolNameMap(tools) {
   return { forward, reverse };
 }
 
+// Chat Completions endpoints (Bailian /v1, etc.) only support function tools.
+// Codex may send built-in tools like "computer" or "web_search", which we must drop.
+function normalizeChatTools(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  const normalized = [];
+  for (const t of tools) {
+    if (t.type === "function" && t.function && typeof t.function.name === "string" && t.function.name) {
+      normalized.push({
+        type: "function",
+        function: {
+          name: t.function.name,
+          description: t.function.description || "",
+          parameters: t.function.parameters || { type: "object", properties: {} },
+        }
+      });
+    }
+  }
+  return normalized.length ? normalized : undefined;
+}
+
+function normalizeChatToolChoice(toolChoice, tools) {
+  if (toolChoice === "auto" || toolChoice === "none" || toolChoice === "required") return toolChoice;
+  if (toolChoice && typeof toolChoice === "object" && toolChoice.type === "function" && toolChoice.function?.name) {
+    const allowed = new Set((tools || []).filter(t => t.type === "function").map(t => t.function.name));
+    if (allowed.has(toolChoice.function.name)) return toolChoice;
+  }
+  return undefined;
+}
+
 // ── Request handler ─────────────────────────────────────────────
 async function handleResponses(req, res) {
   const raw = await readBody(req);
@@ -287,8 +316,9 @@ async function handleResponses(req, res) {
     upstreamBody = responsesToChat(body);
     if (stream) upstreamBody.stream = true;
     if (body.temperature != null) upstreamBody.temperature = body.temperature;
-    if (body.tools) upstreamBody.tools = body.tools;
-    if (body.tool_choice != null) upstreamBody.tool_choice = body.tool_choice;
+    if (body.tools) upstreamBody.tools = normalizeChatTools(body.tools);
+    const chatToolChoice = normalizeChatToolChoice(body.tool_choice, body.tools);
+    if (chatToolChoice != null) upstreamBody.tool_choice = chatToolChoice;
   } else {
     headers["x-api-key"] = provider.apiKey;
     headers["Authorization"] = `Bearer ${provider.apiKey}`;
