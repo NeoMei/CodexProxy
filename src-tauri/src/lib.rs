@@ -181,25 +181,33 @@ pub fn run() {
 
 fn build_tray_menu(app: &tauri::AppHandle, providers: &[(&str, &str, &str)], proxy_running: bool, active_id: &str) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-    
+
     let mut builder = MenuBuilder::new(app);
 
     builder = builder.item(&MenuItemBuilder::with_id("toggle_window", "Show/Hide").build(app)?);
     builder = builder.separator();
 
-    // Each provider gets a top-level submenu; its model slug lives inside, keyed by provider id.
-    for (id, name, model) in providers {
-        let mut sub = SubmenuBuilder::new(app, *name);
-        let label = if *id == active_id { format!("● {model}") } else { (*model).to_string() };
-        sub = sub.item(&MenuItemBuilder::with_id(&format!("provider:{id}"), label).build(app)?);
-        builder = builder.item(&sub.build()?);
+    // Put all providers in one "Models" submenu to keep the tray menu flat and stable.
+    let mut models = SubmenuBuilder::new(app, "Models");
+    if providers.is_empty() {
+        models = models.item(&MenuItemBuilder::with_id("no_providers", "No verified providers").enabled(false).build(app)?);
+    } else {
+        for (id, name, model) in providers {
+            let label = if *id == active_id {
+                format!("✓ {model} ({name})")
+            } else {
+                format!("{model} ({name})")
+            };
+            models = models.item(&MenuItemBuilder::with_id(&format!("provider:{id}"), label).build(app)?);
+        }
     }
+    builder = builder.item(&models.build()?);
     builder = builder.separator();
-    
+
     let proxy_label = if proxy_running { "Stop Proxy" } else { "Start Proxy" };
     builder = builder.item(&MenuItemBuilder::with_id("toggle_proxy", proxy_label).build(app)?);
     builder = builder.separator();
-    
+
     builder = builder.item(&MenuItemBuilder::with_id("quit", "Exit").build(app)?);
     builder.build()
 }
