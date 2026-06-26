@@ -261,6 +261,7 @@ async function handleResponses(req, res) {
     if (body.tool_choice != null) upstreamBody.tool_choice = body.tool_choice;
   } else {
     headers["x-api-key"] = provider.apiKey;
+    headers["Authorization"] = `Bearer ${provider.apiKey}`;
     headers["anthropic-version"] = "2023-06-01";
     const { messages, system } = responsesToAnthropic(body);
     upstreamBody = { model, max_tokens: body.max_output_tokens || 8192, messages, stream };

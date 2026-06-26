@@ -159,9 +159,9 @@ pub async fn test_provider_connection(provider: &Provider) -> Result<String, Str
     };
 
     let endpoint = if is_chat { format!("{url}/chat/completions") } else { format!("{url}/messages") };
-    let auth_header = if is_chat { format!("Authorization: Bearer {}", provider.api_key) } else { format!("x-api-key: {}", provider.api_key) };
 
     let mut cmd = std::process::Command::new("curl");
+    let auth_header = if is_chat { format!("Authorization: Bearer {}", provider.api_key) } else { format!("x-api-key: {}\nAuthorization: Bearer {}", provider.api_key, provider.api_key) };
     let header_path = write_curl_header_file(&auth_header)?;
     cmd.arg("-s").arg("--fail").arg("--max-time").arg("10").arg("--noproxy").arg("*")
         .arg(&endpoint)

@@ -303,6 +303,7 @@ pub fn proxy_path(app: &tauri::AppHandle) -> Result<String, String> {
         for ancestor in exe.ancestors().skip(1) {
             if ancestor.ends_with("target") { continue; }
             let candidate = ancestor.join("proxy").join("index.mjs");
+            log::info!("proxy_path dev candidate: {}", candidate.display());
             if candidate.exists() {
                 return Ok(candidate.to_string_lossy().to_string());
             }
@@ -311,20 +312,25 @@ pub fn proxy_path(app: &tauri::AppHandle) -> Result<String, String> {
 
     // Production: bundled resource directory
     if let Ok(resource_path) = app.path().resolve("proxy/index.mjs", tauri::path::BaseDirectory::Resource) {
+        log::info!("proxy_path resource candidate: {}", resource_path.display());
         if resource_path.exists() {
             return Ok(resource_path.to_string_lossy().to_string());
         }
     }
 
-    // Fallback: next to the executable
+    // Fallback: executable-adjacent locations (various install layouts)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             let candidates = [
+                parent.join("resources").join("proxy").join("index.mjs"),
                 parent.join("proxy").join("index.mjs"),
+                parent.parent().map(|p| p.join("resources").join("proxy").join("index.mjs")).unwrap_or_default(),
                 parent.parent().map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
+                parent.parent().and_then(|p| p.parent()).map(|p| p.join("resources").join("proxy").join("index.mjs")).unwrap_or_default(),
                 parent.parent().and_then(|p| p.parent()).map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
             ];
             for c in &candidates {
+                log::info!("proxy_path fallback candidate: {}", c.display());
                 if c.exists() { return Ok(c.to_string_lossy().to_string()); }
             }
         }
@@ -338,8 +344,10 @@ pub fn proxy_path(app: &tauri::AppHandle) -> Result<String, String> {
         cwd.parent().map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
     ];
     for c in &dev_candidates {
+        log::info!("proxy_path cwd candidate: {}", c.display());
         if c.exists() { return Ok(c.to_string_lossy().to_string()); }
     }
 
+    log::error!("proxy/index.mjs not found in any candidate location");
     Err("proxy/index.mjs not found".into())
 }

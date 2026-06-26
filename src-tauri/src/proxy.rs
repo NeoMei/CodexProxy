@@ -42,6 +42,11 @@ impl ProxyManager {
     pub fn port(&self) -> u16 { self.port }
 
     pub fn start(&self, proxy_path: &str) -> Result<(), String> {
+        // Verify node is available before trying to spawn the proxy.
+        if Command::new("node").arg("--version").output().is_err() {
+            return Err("Node.js is required but not found in PATH. Please install Node.js 18+ to run the proxy.".into());
+        }
+
         let owns_child = self.child.lock().map(|g| g.is_some()).unwrap_or(false);
         if !owns_child && self.is_port_listening() {
             kill_port_occupants(self.port);
