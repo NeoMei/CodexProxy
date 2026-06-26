@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { t, setLocale, getLocale } from "./data/locale";
 import { BUILTIN_PRESETS, findPreset } from "./data/presets";
@@ -82,6 +83,15 @@ function App() {
   useEffect(() => {
     invoke<string>("get_setting", { key: "current_provider_id" }).then(v => setActiveId(v)).catch(() => {});
     invoke<string>("get_setting", { key: "auto_start" }).then(v => setAutoStart(v === "true")).catch(() => {});
+  }, []);
+
+  // Keep UI in sync when the active provider is changed from the tray menu.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>("provider-changed", (event) => {
+      setActiveId(event.payload);
+    }).then(fn => { unlisten = fn; }).catch(() => {});
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   // If the active provider no longer exists (deleted/edited), clear it.

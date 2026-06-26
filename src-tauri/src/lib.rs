@@ -7,6 +7,7 @@ use db::Database;
 use proxy::{ProxyManager, SharedProxyManager};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::Manager;
+use tauri::Emitter;
 use tauri::tray::TrayIcon;
 
 pub struct TrayState(pub StdMutex<Option<TrayIcon>>);
@@ -101,6 +102,14 @@ pub fn run() {
                                             let _ = proxy.start(&proxy_path);
                                         }
                                     }
+                                    // Rebuild tray menu so the active marker moves, and notify UI
+                                    let _ = commands::rebuild_tray_menu(
+                                        app_handle.clone(),
+                                        app_handle.state::<Database>(),
+                                        app_handle.state::<crate::TrayState>(),
+                                        app_handle.state::<SharedProxyManager>(),
+                                    );
+                                    let _ = app_handle.emit("provider-changed", &pid);
                                 }
                             }
                             _ => {}
