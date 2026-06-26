@@ -2,6 +2,19 @@ use crate::db::Provider;
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
+use uuid::Uuid;
+
+/// Write a curl header to a temporary file so API keys are not exposed on the command line.
+pub fn write_curl_header_file(header: &str) -> Result<PathBuf, String> {
+    let mut path = std::env::temp_dir();
+    path.push(format!("coding-plan-header-{}.txt", Uuid::new_v4()));
+    fs::write(&path, format!("{}\n", header)).map_err(|e| e.to_string())?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
 
 fn codex_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".codex")
@@ -36,11 +49,15 @@ js_repl = false
         model = model,
         ctx = context_window,
         port = proxy_port,
-        models_toml = verified_providers.iter()
-            .filter(|p| p.verified && !p.api_key.is_empty())
-            .map(|p| format!("\"{}\" = \"{}\"", p.model, p.model))
-            .collect::<Vec<_>>()
-            .join("\n")
+        models_toml = {
+            let mut seen = std::collections::HashSet::new();
+            verified_providers.iter()
+                .filter(|p| p.verified && !p.api_key.is_empty())
+                .filter(|p| seen.insert(&p.model))
+                .map(|p| format!("\"{}\" = \"{}\"", p.model, p.model))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     );
 
     fs::write(dir.join("config.toml"), &config).map_err(|e| e.to_string())?;
@@ -69,8 +86,10 @@ pub fn read_codex_config() -> Result<String, String> {
 
 /// Generate model catalog JSON for verified providers only
 pub fn write_model_catalog(providers: &[Provider]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
     let models: Vec<serde_json::Value> = providers.iter()
         .filter(|p| p.enabled && p.verified && !p.api_key.is_empty())
+        .filter(|p| seen.insert(&p.model))
         .map(|p| {
             let efforts: Vec<serde_json::Value> = if p.model.contains("deepseek") {
                 vec!["low","medium","high","xhigh"]
@@ -143,9 +162,10 @@ pub async fn test_provider_connection(provider: &Provider) -> Result<String, Str
     let auth_header = if is_chat { format!("Authorization: Bearer {}", provider.api_key) } else { format!("x-api-key: {}", provider.api_key) };
 
     let mut cmd = std::process::Command::new("curl");
-    cmd.arg("-s").arg("--max-time").arg("10").arg("--noproxy").arg("*")
+    let header_path = write_curl_header_file(&auth_header)?;
+    cmd.arg("-s").arg("--fail").arg("--max-time").arg("10").arg("--noproxy").arg("*")
         .arg(&endpoint)
-        .arg("-H").arg(&auth_header)
+        .arg("-H").arg(format!("@{}", header_path.display()))
         .arg("-H").arg("content-type: application/json")
         .arg("-d").arg(serde_json::to_string(&body).unwrap_or_default());
 
@@ -158,13 +178,12 @@ pub async fn test_provider_connection(provider: &Provider) -> Result<String, Str
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let output = cmd.output().map_err(|e| format!("curl error: {}", e))?;
+    let output_res = cmd.output();
+    let _ = fs::remove_file(&header_path);
+    let output = output_res.map_err(|e| format!("curl error: {}", e))?;
 
     if output.status.success() {
-        let body_str = String::from_utf8_lossy(&output.stdout);
-        let ok = body_str.contains("\"type\":\"message\"") || body_str.contains("\"content\"") || body_str.contains("\"choices\"");
-        if ok { Ok("ok".to_string()) }
-        else { Err(format!("Unexpected: {}", body_str.chars().take(200).collect::<String>())) }
+        Ok("ok".to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);

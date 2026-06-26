@@ -42,6 +42,14 @@ impl ProxyManager {
     pub fn port(&self) -> u16 { self.port }
 
     pub fn start(&self, proxy_path: &str) -> Result<(), String> {
+        let owns_child = self.child.lock().map(|g| g.is_some()).unwrap_or(false);
+        if !owns_child && self.is_port_listening() {
+            kill_port_occupants(self.port);
+            for _ in 0..6 {
+                if !self.is_port_listening() { break; }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
         if self.is_port_listening() {
             log::info!("Proxy port {} already in use", self.port);
             return Ok(());
@@ -68,28 +76,52 @@ impl ProxyManager {
             }
             *guard = None;
         }
-        // Kill anything on the port via PowerShell (more reliable than cmd for /f)
-        let port = self.port;
-        #[cfg(windows)]
-        {
-            let ps_cmd = format!(
-                "Stop-Process -Id (Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue",
-            );
-            let _ = std::process::Command::new("powershell")
-                .args(["-Command", &ps_cmd])
-                .creation_flags(0x08000000)
-                .output();
-        }
+        // Kill any remaining proxy process on the port, but only if its command line
+        // contains the proxy script path. This avoids killing unrelated node processes.
+        kill_port_occupants(self.port);
         // Wait for port to free (max 3s)
         for _ in 0..6 {
             if !self.is_port_listening() { return Ok(()); }
             std::thread::sleep(Duration::from_millis(500));
         }
         if self.is_port_listening() {
-            Err(format!("Port {} still busy. Run: taskkill /F /IM node.exe", self.port))
+            Err(format!("Port {} still busy. Stop the process manually.", self.port))
         } else {
             Ok(())
         }
+    }
+}
+
+/// Kill processes listening on the given port whose command line references the proxy script.
+#[cfg(windows)]
+fn kill_port_occupants(port: u16) {
+    let ps_cmd = format!(
+        "Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | ForEach-Object {{ \
+            $p = Get-CimInstance Win32_Process -Filter \"ProcessId = $($_.OwningProcess)\" -ErrorAction SilentlyContinue; \
+            if ($p -and $p.CommandLine -like '*proxy*index.mjs*') {{ \
+                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue \
+            }} \
+        }}"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-Command", &ps_cmd])
+        .creation_flags(0x08000000)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn kill_port_occupants(port: u16) {
+    let Ok(output) = std::process::Command::new("lsof")
+        .args(["-ti", &format!(":{port}")])
+        .output()
+    else { return };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for pid_str in text.split_whitespace() {
+        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        let cmdline_path = std::path::PathBuf::from(format!("/proc/{pid}/cmdline"));
+        let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) else { continue };
+        if !cmdline.contains("proxy/index.mjs") { continue; }
+        let _ = std::process::Command::new("kill").args(["-9", pid_str]).output();
     }
 }
 

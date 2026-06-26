@@ -1,7 +1,7 @@
 use crate::db::{Database, Provider};
 use crate::proxy::SharedProxyManager;
 use crate::codex_config;
-use tauri::State;
+use tauri::{State, Manager};
 use uuid::Uuid;
 use std::collections::BTreeMap;
 #[cfg(windows)]
@@ -39,47 +39,81 @@ pub async fn test_connection(provider: Provider) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn start_proxy(proxy: State<SharedProxyManager>, db: State<Database>) -> Result<(), String> {
-    // Write provider config for the Node.js proxy
+pub fn start_proxy(app: tauri::AppHandle, proxy: State<SharedProxyManager>, db: State<Database>) -> Result<(), String> {
+    start_proxy_service(&app, &proxy, &db)
+}
+
+/// Build the proxy config (model slug -> upstream/key/protocol) from verified providers.
+/// When several providers share a slug, the active one (by id) wins so the proxy routes
+/// that slug to the channel the user actually activated.
+pub fn build_proxy_config(providers: &[Provider], active_id: &str) -> BTreeMap<String, serde_json::Value> {
+    let mut config: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut active_entry = None;
+    for p in providers.iter().filter(|p| p.verified && !p.api_key.is_empty()) {
+        let entry = serde_json::json!({
+            "upstream": p.upstream,
+            "apiKey": p.api_key,
+            "protocol": if !p.upstream.contains("/anthropic") { "chat" } else { "anthropic" }
+        });
+        if p.id == active_id { active_entry = Some((p.model.clone(), entry)); }
+        else { config.insert(p.model.clone(), entry); }
+    }
+    if let Some((slug, entry)) = active_entry { config.insert(slug, entry); }
+    config
+}
+
+pub fn write_proxy_config(providers: &[Provider], active_id: &str) -> Result<(), String> {
+    let config = build_proxy_config(providers, active_id);
+    let path = dirs::home_dir().unwrap_or_default().join(".coding-plan-proxy.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap_or_default())
+        .map_err(|e| format!("Cannot write proxy config: {}", e))
+}
+
+/// Shared logic used by the start command and by auto-start.
+pub fn start_proxy_service(app: &tauri::AppHandle, proxy: &SharedProxyManager, db: &Database) -> Result<(), String> {
     let providers = db.list_providers().map_err(|e| format!("DB error: {}", e))?;
-    let enabled_providers: Vec<&Provider> = providers.iter()
-        .filter(|p| p.enabled && !p.api_key.is_empty())
-        .collect();
+    let active_id = db.get_setting("current_provider_id").unwrap_or_default();
+    write_proxy_config(&providers, &active_id)?;
 
-    let config: BTreeMap<String, serde_json::Value> = enabled_providers.iter()
-        .map(|p| {
-            let is_chat = !p.upstream.contains("/anthropic");
-            (p.model.clone(), serde_json::json!({
-                "upstream": p.upstream,
-                "apiKey": p.api_key,
-                "protocol": if is_chat { "chat" } else { "anthropic" }
-            }))
-        })
-        .collect();
-
-    let config_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".coding-plan-proxy.json");
-    let json_str = serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string());
-    std::fs::write(&config_path, &json_str).map_err(|e| format!("Cannot write proxy config: {}", e))?;
-
-    // Start the proxy (returns error if node not found)
-    let proxy_path = proxy_path();
+    let proxy_path = proxy_path(app)?;
     proxy.start(&proxy_path)?;
 
-    // Write Codex config only if we have verified providers
-    let verified: Vec<&Provider> = providers.iter().filter(|p| p.verified).collect();
-    if !verified.is_empty() {
-        codex_config::write_model_catalog(&providers).map_err(|e| format!("Catalog: {}", e))?;
-        codex_config::write_codex_auth().map_err(|e| format!("Auth: {}", e))?;
-        let current_model = db.get_setting("current_model").unwrap_or_default();
-        let model = if current_model.is_empty() {
-            verified.first().map(|p| p.model.clone()).unwrap_or_default()
-        } else { current_model };
-        let ctx = verified.iter().find(|p| p.model == model).map(|p| p.context_window).unwrap_or(262144);
-        codex_config::write_codex_config(&model, proxy.port(), ctx, &providers).map_err(|e| format!("Config: {}", e))?;
-    }
+    let verified: Vec<&Provider> = providers.iter().filter(|p| p.verified && !p.api_key.is_empty()).collect();
+    if verified.is_empty() { return Ok(()); }
 
+    // Empty active_id = deliberately deactivated. A stale id falls back to the first verified.
+    let active = if active_id.is_empty() {
+        // Migrate legacy current_model (slug) → provider id once.
+        let legacy = db.get_setting("current_model").unwrap_or_default();
+        if !legacy.is_empty() {
+            if let Some(p) = verified.iter().find(|p| p.model == legacy).copied() {
+                let _ = db.set_setting("current_provider_id", &p.id);
+                let _ = db.set_setting("current_model", "");
+                Some(p)
+            } else { None }
+        } else { None }
+    } else {
+        match verified.iter().find(|p| p.id == active_id).copied() {
+            Some(p) => Some(p),
+            None => {
+                let fallback = verified.first().copied().unwrap();
+                let _ = db.set_setting("current_provider_id", &fallback.id);
+                Some(fallback)
+            }
+        }
+    };
+    match active {
+        Some(p) => {
+            codex_config::write_model_catalog(&providers).map_err(|e| format!("Catalog: {}", e))?;
+            codex_config::write_codex_auth().map_err(|e| format!("Auth: {}", e))?;
+            codex_config::write_codex_config(&p.model, proxy.port(), p.context_window, &providers).map_err(|e| format!("Config: {}", e))?;
+        }
+        None => {
+            codex_config::write_model_catalog(&[]).ok();
+            codex_config::write_codex_auth().ok();
+            codex_config::write_codex_config("", proxy.port(), 0, &[]).ok();
+        }
+    }
     Ok(())
 }
 
@@ -99,42 +133,32 @@ pub fn proxy_port(proxy: State<SharedProxyManager>) -> Result<u16, String> {
 }
 
 #[tauri::command]
-pub fn apply_to_codex(db: State<Database>, proxy: State<SharedProxyManager>, model: String) -> Result<(), String> {
+pub fn apply_to_codex(app: tauri::AppHandle, db: State<Database>, proxy: State<SharedProxyManager>, id: String) -> Result<(), String> {
     let all_providers = db.list_providers()?;
-    let verified: Vec<&Provider> = all_providers.iter().filter(|p| p.verified && !p.api_key.is_empty()).collect();
-    
-    let provider = all_providers.iter().find(|p| p.model == model)
-        .ok_or_else(|| format!("Model not found: {}", model))?;
-    
-    // Write proxy config with ALL verified providers (so proxy supports them all)
-    let config: BTreeMap<String, serde_json::Value> = verified.iter()
-        .map(|p| {
-            let is_chat = !p.upstream.contains("/anthropic");
-            (p.model.clone(), serde_json::json!({"upstream": p.upstream, "apiKey": p.api_key, "protocol": if is_chat { "chat" } else { "anthropic" }}))
-        })
-        .collect();
-    let config_path = dirs::home_dir().unwrap_or_default().join(".coding-plan-proxy.json");
-    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default())
-        .map_err(|e| format!("Cannot write proxy config: {}", e))?;
-    
-    // Restart proxy to pick up new config (if it was running)
-    let was_running = proxy.is_running();
-    if was_running {
-        proxy.stop()?;
-    }
-    
-    // Write Codex config with selected model
+    let provider = all_providers.iter()
+        .find(|p| p.id == id && p.verified && !p.api_key.is_empty())
+        .ok_or_else(|| format!("Provider not found or not verified: {}", id))?;
+
+    write_proxy_config(&all_providers, &id)?;
     codex_config::write_codex_config(&provider.model, proxy.port(), provider.context_window, &all_providers)?;
     codex_config::write_model_catalog(&all_providers)?;
     codex_config::write_codex_auth()?;
-    db.set_setting("current_model", &model)?;
-    
-    // Restart proxy
-    if was_running {
-        let proxy_path = proxy_path();
+    db.set_setting("current_provider_id", &id)?;
+
+    if proxy.is_running() {
+        proxy.stop()?;
+        let proxy_path = proxy_path(&app)?;
         proxy.start(&proxy_path)?;
     }
-    
+    Ok(())
+}
+
+#[tauri::command]
+pub fn deactivate_model(db: State<Database>, proxy: State<SharedProxyManager>) -> Result<(), String> {
+    db.set_setting("current_provider_id", "")?;
+    codex_config::write_model_catalog(&[])?;
+    codex_config::write_codex_auth()?;
+    codex_config::write_codex_config("", proxy.port(), 0, &[])?;
     Ok(())
 }
 
@@ -179,14 +203,17 @@ pub fn fetch_models(upstream: String, api_key: String) -> Result<serde_json::Val
     let url = format!("{base}/models");
     
     let mut cmd = std::process::Command::new("curl");
-    cmd.arg("-s").arg("--max-time").arg("8").arg("--noproxy").arg("*")
+    let header_path = codex_config::write_curl_header_file(&format!("x-api-key: {api_key}"))?;
+    cmd.arg("-s").arg("--fail").arg("--max-time").arg("8").arg("--noproxy").arg("*")
         .arg(&url)
-        .arg("-H").arg(format!("x-api-key: {api_key}"))
+        .arg("-H").arg(format!("@{}", header_path.display()))
         .arg("-H").arg("anthropic-version: 2023-06-01");
     
     #[cfg(windows)] { cmd.creation_flags(0x08000000); }
     
-    let output = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    let output_res = cmd.output();
+    let _ = std::fs::remove_file(&header_path);
+    let output = output_res.map_err(|e| format!("curl: {e}"))?;
     let body = String::from_utf8_lossy(&output.stdout).to_string();
     
     // If Anthropic endpoint returns empty, try base domain's /v1/models with Bearer
@@ -200,11 +227,14 @@ pub fn fetch_models(upstream: String, api_key: String) -> Result<serde_json::Val
         } else { upstream.trim_end_matches('/') };
         let fallback_url = format!("{origin}/v1/models");
         let mut cmd2 = std::process::Command::new("curl");
-        cmd2.arg("-s").arg("--max-time").arg("8").arg("--noproxy").arg("*")
+        let header2_path = codex_config::write_curl_header_file(&format!("Authorization: Bearer {api_key}"))?;
+        cmd2.arg("-s").arg("--fail").arg("--max-time").arg("8").arg("--noproxy").arg("*")
             .arg(&fallback_url)
-            .arg("-H").arg(format!("Authorization: Bearer {api_key}"));
+            .arg("-H").arg(format!("@{}", header2_path.display()));
         #[cfg(windows)] { cmd2.creation_flags(0x08000000); }
-        let out2 = cmd2.output().map_err(|e| format!("curl: {e}"))?;
+        let out2_res = cmd2.output();
+        let _ = std::fs::remove_file(&header2_path);
+        let out2 = out2_res.map_err(|e| format!("curl: {e}"))?;
         let body2 = String::from_utf8_lossy(&out2.stdout).to_string();
         if body2.trim().is_empty() {
             return Err("Endpoint does not support model listing. Use preset or enter model ID manually.".into());
@@ -254,11 +284,12 @@ pub fn rebuild_tray_menu(app: tauri::AppHandle, db: State<Database>, tray: State
     let providers = db.list_providers()?;
     let verified: Vec<(&str, &str, &str)> = providers.iter()
         .filter(|p| p.verified && !p.api_key.is_empty())
-        .map(|p| (p.model.as_str(), p.name.as_str(), p.name.as_str()))
+        .map(|p| (p.id.as_str(), p.name.as_str(), p.model.as_str()))
         .collect();
-    
-    let menu = crate::build_tray_menu(&app, &verified, proxy.is_running()).map_err(|e| e.to_string())?;
-    if let Ok(mut guard) = tray.0.lock() {
+    let active_id = db.get_setting("current_provider_id").unwrap_or_default();
+
+    let menu = crate::build_tray_menu(&app, &verified, proxy.is_running(), &active_id).map_err(|e| e.to_string())?;
+    if let Ok(guard) = tray.0.lock() {
         if let Some(ref tray_icon) = *guard {
             tray_icon.set_menu(Some(menu)).map_err(|e| e.to_string())?;
         }
@@ -266,8 +297,26 @@ pub fn rebuild_tray_menu(app: tauri::AppHandle, db: State<Database>, tray: State
     Ok(())
 }
 
-fn proxy_path() -> String {
-    // Production: bundled resource next to the executable
+pub fn proxy_path(app: &tauri::AppHandle) -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1) {
+            if ancestor.ends_with("target") { continue; }
+            let candidate = ancestor.join("proxy").join("index.mjs");
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Production: bundled resource directory
+    if let Ok(resource_path) = app.path().resolve("proxy/index.mjs", tauri::path::BaseDirectory::Resource) {
+        if resource_path.exists() {
+            return Ok(resource_path.to_string_lossy().to_string());
+        }
+    }
+
+    // Fallback: next to the executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             let candidates = [
@@ -276,7 +325,7 @@ fn proxy_path() -> String {
                 parent.parent().and_then(|p| p.parent()).map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
             ];
             for c in &candidates {
-                if c.exists() { return c.to_string_lossy().to_string(); }
+                if c.exists() { return Ok(c.to_string_lossy().to_string()); }
             }
         }
     }
@@ -289,16 +338,8 @@ fn proxy_path() -> String {
         cwd.parent().map(|p| p.join("proxy").join("index.mjs")).unwrap_or_default(),
     ];
     for c in &dev_candidates {
-        if c.exists() { return c.to_string_lossy().to_string(); }
+        if c.exists() { return Ok(c.to_string_lossy().to_string()); }
     }
 
-    // Hardcoded dev fallback
-    let fallback = dirs::home_dir()
-        .unwrap_or_default()
-        .join("AppData").join("Roaming").join("reasonix").join("global-workspace")
-        .join("coding-plan-tauri").join("proxy").join("index.mjs");
-    if fallback.exists() { return fallback.to_string_lossy().to_string(); }
-
-    log::error!("Proxy index.mjs not found at any known location");
-    "proxy/index.mjs".to_string()
+    Err("proxy/index.mjs not found".into())
 }

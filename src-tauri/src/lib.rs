@@ -6,7 +6,6 @@ mod proxy;
 use db::Database;
 use proxy::{ProxyManager, SharedProxyManager};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::collections::BTreeMap;
 use tauri::Manager;
 use tauri::tray::TrayIcon;
 
@@ -37,14 +36,21 @@ pub fn run() {
                 .unwrap_or(false);
             if auto_start {
                 let proxy_state = app.state::<SharedProxyManager>();
-                if let Ok(proxy_path) = find_proxy_path(app.handle()) {
-                    let _ = proxy_state.start(&proxy_path);
-                }
+                let db_state = app.state::<Database>();
+                let _ = commands::start_proxy_service(&app.handle(), &proxy_state, &db_state);
             }
 
-            // Build initial tray menu
+            // Build initial tray menu from verified providers
             use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
-            let menu = build_tray_menu(app.handle(), &[], false)?;
+            let db_for_tray = app.state::<Database>();
+            let providers_list = db_for_tray.list_providers().unwrap_or_default();
+            let active_id = db_for_tray.get_setting("current_provider_id").unwrap_or_default();
+            let initial_providers: Vec<(&str, &str, &str)> = providers_list
+                .iter()
+                .filter(|p| p.verified && !p.api_key.is_empty())
+                .map(|p| (p.id.as_str(), p.name.as_str(), p.model.as_str()))
+                .collect();
+            let menu = build_tray_menu(app.handle(), &initial_providers, false, &active_id)?;
             
             let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
@@ -67,37 +73,31 @@ pub fn run() {
                             }
                             "toggle_proxy" => {
                                 let proxy = app_handle.state::<SharedProxyManager>();
-                                if proxy.is_running() { let _ = proxy.stop(); }
-                                else {
+                                if proxy.is_running() {
+                                    let _ = proxy.stop();
+                                } else {
                                     let _db = app_handle.state::<Database>();
-                                    if let Ok(proxy_path) = find_proxy_path(&app_handle) {
-                                        let _ = proxy.start(&proxy_path);
-                                    }
+                                    let _ = commands::start_proxy_service(&app_handle, &proxy, &_db);
                                 }
                             }
-                            id if id.starts_with("model:") => {
-                                let model = id.strip_prefix("model:").unwrap_or("").to_string();
+                            id if id.starts_with("provider:") => {
+                                let pid = id.strip_prefix("provider:").unwrap_or("").to_string();
                                 let _db = app_handle.state::<Database>();
                                 let proxy = app_handle.state::<SharedProxyManager>();
                                 if let Ok(providers) = _db.list_providers() {
-                                    // Update proxy config with all verified providers
-                                    let config: BTreeMap<String, serde_json::Value> = providers.iter()
-                                        .filter(|p| !p.api_key.is_empty())
-                                        .map(|p| {
-                                            let is_chat = !p.upstream.contains("/anthropic");
-                                            (p.model.clone(), serde_json::json!({"upstream": p.upstream, "apiKey": p.api_key, "protocol": if is_chat { "chat" } else { "anthropic" }}))
-                                        })
-                                        .collect();
-                                    let config_path = dirs::home_dir().unwrap_or_default().join(".coding-plan-proxy.json");
-                                    let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default());
+                                    let Some(selected) = providers.iter().find(|p| p.id == pid && p.verified && !p.api_key.is_empty()) else { return; };
+                                    let model = selected.model.clone();
+                                    let ctx = selected.context_window;
+                                    let _ = commands::write_proxy_config(&providers, &pid);
+                                    let _ = _db.set_setting("current_provider_id", &pid);
                                     // Restart proxy with new config
                                     let was_running = proxy.is_running();
                                     if was_running { let _ = proxy.stop(); }
-                                    let _ = codex_config::write_codex_config(&model, proxy.port(), 262144, &providers);
+                                    let _ = codex_config::write_codex_config(&model, proxy.port(), ctx, &providers);
                                     let _ = codex_config::write_model_catalog(&providers);
                                     let _ = codex_config::write_codex_auth();
                                     if was_running {
-                                        if let Ok(proxy_path) = find_proxy_path(&app_handle) {
+                                        if let Ok(proxy_path) = commands::proxy_path(&app_handle) {
                                             let _ = proxy.start(&proxy_path);
                                         }
                                     }
@@ -152,6 +152,7 @@ pub fn run() {
             commands::proxy_status,
             commands::proxy_port,
             commands::apply_to_codex,
+            commands::deactivate_model,
             commands::read_codex_config,
             commands::set_verified,
             commands::fetch_models,
@@ -163,29 +164,19 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn build_tray_menu(app: &tauri::AppHandle, providers: &[(&str, &str, &str)], proxy_running: bool) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
+fn build_tray_menu(app: &tauri::AppHandle, providers: &[(&str, &str, &str)], proxy_running: bool, active_id: &str) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-    use std::collections::BTreeMap;
-    
-    // Group models by vendor name
-    let mut vendors: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
-    for (model, name, _vendor) in providers {
-        // Extract vendor from name: "Kimi Coding Plan" → vendor = "Kimi"
-        let vendor = name.split_whitespace().next().unwrap_or(name);
-        vendors.entry(vendor).or_default().push((*model, *name));
-    }
     
     let mut builder = MenuBuilder::new(app);
-    
+
     builder = builder.item(&MenuItemBuilder::with_id("toggle_window", "Show/Hide").build(app)?);
     builder = builder.separator();
-    
-    // Submenus for each vendor
-    for (vendor, models) in &vendors {
-        let mut sub = SubmenuBuilder::new(app, *vendor);
-        for (model, name) in models {
-            sub = sub.item(&MenuItemBuilder::with_id(&format!("model:{model}"), *name).build(app)?);
-        }
+
+    // Each provider gets a top-level submenu; its model slug lives inside, keyed by provider id.
+    for (id, name, model) in providers {
+        let mut sub = SubmenuBuilder::new(app, *name);
+        let label = if *id == active_id { format!("● {model}") } else { (*model).to_string() };
+        sub = sub.item(&MenuItemBuilder::with_id(&format!("provider:{id}"), label).build(app)?);
         builder = builder.item(&sub.build()?);
     }
     builder = builder.separator();
@@ -196,14 +187,4 @@ fn build_tray_menu(app: &tauri::AppHandle, providers: &[(&str, &str, &str)], pro
     
     builder = builder.item(&MenuItemBuilder::with_id("quit", "Exit").build(app)?);
     builder.build()
-}
-
-fn find_proxy_path(_app: &tauri::AppHandle) -> Result<String, String> {
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().take(4) {
-            let candidate = ancestor.join("proxy").join("index.mjs");
-            if candidate.exists() { return Ok(candidate.to_string_lossy().to_string()); }
-        }
-    }
-    Err("proxy/index.mjs not found".into())
 }

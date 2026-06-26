@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { t, setLocale, getLocale } from "./data/locale";
@@ -39,7 +39,20 @@ function App() {
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [autoStart, setAutoStart] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
-  const [currentModel, setCurrentModel] = useState("");
+  const [activeId, setActiveId] = useState("");
+  const statusTimer = useRef<number | null>(null);
+
+  const setStatus = (msg: string, durationMs?: number) => {
+    if (statusTimer.current) { clearTimeout(statusTimer.current); statusTimer.current = null; }
+    setStatusMsg(msg);
+    if (durationMs && durationMs > 0) {
+      statusTimer.current = window.setTimeout(() => setStatusMsg(""), durationMs);
+    }
+  };
+
+  useEffect(() => {
+    return () => { if (statusTimer.current) clearTimeout(statusTimer.current); };
+  }, []);
 
   const refreshProviders = useCallback(async () => {
     const list = await invoke<Provider[]>("list_providers");
@@ -48,7 +61,15 @@ function App() {
 
   const refreshStatus = useCallback(async () => {
     const running = await invoke<boolean>("proxy_status");
-    setProxyRunning(running);
+    let changed = false;
+    setProxyRunning(current => {
+      changed = current !== running;
+      return running;
+    });
+    if (changed) {
+      setCodexTest(null);
+      await invoke("rebuild_tray_menu");
+    }
     try { setProxyPort(await invoke<number>("proxy_port")); } catch {}
   }, []);
 
@@ -59,109 +80,115 @@ function App() {
   }, [refreshStatus]);
 
   useEffect(() => {
-    invoke<string>("read_codex_config").then(cfg => {
-      const m = cfg.match(/^model\s*=\s*"([^"]+)"/m);
-      if (m) setCurrentModel(m[1]);
-    }).catch(() => {});
+    invoke<string>("get_setting", { key: "current_provider_id" }).then(v => setActiveId(v)).catch(() => {});
     invoke<string>("get_setting", { key: "auto_start" }).then(v => setAutoStart(v === "true")).catch(() => {});
   }, []);
+
+  // If the active provider no longer exists (deleted/edited), clear it.
+  useEffect(() => {
+    if (activeId && !providers.some(p => p.id === activeId)) {
+      setActiveId("");
+      invoke("set_setting", { key: "current_provider_id", value: "" }).catch(() => {});
+    }
+  }, [providers, activeId]);
 
   const switchLocale = (l: string) => { setLoc(l); setLocale(l); };
 
   const toggleProxy = async () => {
     try {
       if (proxyRunning) {
-        setStatusMsg("Stopping...");
+        setStatus("Stopping...");
         await invoke("stop_proxy");
         // Wait and verify
         await new Promise(r => setTimeout(r, 1000));
-        setStatusMsg("");
+        setStatus("");
       } else {
         if (!hasKeys) {
-          setStatusMsg("Add a provider with an API key first");
+          setStatus("Add a provider with an API key first", 5000);
           return;
         }
-        setStatusMsg("Starting...");
+        setStatus("Starting...");
         await invoke("start_proxy");
-        setStatusMsg("");
+        setStatus("");
       }
-      refreshStatus();
+      await refreshStatus();
     } catch (e: any) {
-      setStatusMsg(String(e));
+      setStatus(String(e), 5000);
     }
   };
 
   const testProvider = async (p: Provider) => {
     setTesting(t => ({ ...t, [p.id]: true }));
-    setStatusMsg(`Testing ${p.name}...`);
+    setStatus(`Testing ${p.name}...`);
     try {
       await invoke<string>("test_connection", { provider: p });
       setTestResult(t => ({ ...t, [p.id]: "ok" }));
       await invoke("set_verified", { id: p.id, verified: true });
       await invoke("rebuild_tray_menu");
-      setStatusMsg(`✓ ${p.name}: connected`);
+      setStatus(`✓ ${p.name}: connected`, 3000);
     } catch (e: any) {
       setTestResult(t => ({ ...t, [p.id]: "fail" }));
       await invoke("set_verified", { id: p.id, verified: false });
-      setStatusMsg(`✗ ${p.name}: ${String(e).slice(0, 80)}`);
+      setStatus(`✗ ${p.name}: ${String(e).slice(0, 80)}`, 5000);
     }
     setTesting(t => ({ ...t, [p.id]: false }));
     await refreshProviders();
-    setTimeout(() => setStatusMsg(""), 3000);
   };
 
   const sortedProviders = [...providers].sort((a, b) => a.sort_index - b.sort_index);
 
-  const hasKeys = providers.some(p => p.api_key.length > 4);
+  const hasKeys = providers.some(p => p.api_key.trim().length > 0);
 
-  const applyModel = async (model: string) => {
+  const applyModel = async (p: Provider) => {
     try {
-      await invoke("apply_to_codex", { model });
-      setCurrentModel(model);
+      await invoke("apply_to_codex", { id: p.id });
+      setActiveId(p.id);
       await invoke("rebuild_tray_menu");
-      setStatusMsg(`✓ Active model: ${model}`);
-      setTimeout(() => setStatusMsg(""), 5000);
+      setStatus(`✓ Active: ${p.name}`, 5000);
     } catch (e: any) {
-      setStatusMsg(`Apply failed: ${String(e)}`);
+      setStatus(`Apply failed: ${String(e)}`, 5000);
     }
-    refreshStatus();
+    await refreshStatus();
+  };
+
+  const deactivateModel = async () => {
+    try {
+      await invoke("deactivate_model");
+      setActiveId("");
+      await invoke("rebuild_tray_menu");
+      setStatus("Active model cleared", 3000);
+    } catch (e: any) {
+      setStatus(`Deactivate failed: ${String(e)}`, 5000);
+    }
   };
 
   const saveProvider = async (p: Provider) => {
     if (!p.id) p.id = await invoke<string>("generate_id");
     await invoke("save_provider", { provider: p });
-    
-    // Batch save if we fetched multiple models
-    const batch = (p as any)._batch_models;
-    if (batch && batch.length > 1) {
-      const all = [];
-      for (const m of batch) {
-        if (m.id === p.model) continue; // already saved the selected one
-        all.push({
-          ...p,
-          id: await invoke("generate_id"),
-          model: m.id,
-          context_window: (m as any).context_length || p.context_window,
-          max_output_tokens: (m as any).max_tokens || p.max_output_tokens,
-          verified: false,
-        });
-      }
-      if (all.length > 0) await invoke("save_providers", { providers: all });
-    }
-    
     setEditing(null); setShowAdd(false); setQuickSetup(null);
-    refreshProviders();
+    await refreshProviders();
+    await invoke("rebuild_tray_menu");
   };
 
   const deleteProvider = async (id: string) => {
+    const doomed = providers.find(p => p.id === id);
     await invoke("delete_provider", { id });
-    refreshProviders();
+    if (doomed && doomed.id === activeId) {
+      setActiveId("");
+      invoke("set_setting", { key: "current_provider_id", value: "" }).catch(() => {});
+    }
+    await refreshProviders();
+    await invoke("rebuild_tray_menu");
   };
 
   const toggleAutoStart = async () => {
     const next = !autoStart;
     setAutoStart(next);
-    await invoke("set_setting", { key: "auto_start", value: String(next) });
+    try {
+      await invoke("set_setting", { key: "auto_start", value: String(next) });
+    } catch {
+      setAutoStart(!next);
+    }
   };
 
   const openQuickSetup = (model: string) => {
@@ -197,7 +224,7 @@ function App() {
             {proxyRunning ? `${t("proxy.running")} :${proxyPort}` : t("proxy.stopped")}
           </span>
           {statusMsg && (
-            <span className="ml-2 text-xs text-red-500 max-w-xs truncate">{statusMsg}</span>
+            <span className={`ml-2 text-xs max-w-xs truncate ${statusMsg.startsWith("✓") ? "text-emerald-500" : "text-red-500"}`}>{statusMsg}</span>
           )}
         </div>
         <div className="flex items-center gap-1.5">
@@ -244,7 +271,7 @@ function App() {
 
           <div className="space-y-2">
             {sortedProviders.map(p => {
-              const hasKey = p.api_key.length > 4;
+              const hasKey = p.api_key.trim().length > 0;
               const testState = testResult[p.id];
               return (
                 <div key={p.id}
@@ -264,12 +291,17 @@ function App() {
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-sm">{p.name}</span>
                       <code className={`text-xs px-1.5 py-0.5 rounded ${theme === "light" ? "bg-zinc-100 text-zinc-500" : "bg-zinc-800 text-zinc-400"}`}>{p.model}</code>
-                      {p.model === currentModel && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400 border border-emerald-600/30">✓ Active</span>
+                      {p.id === activeId && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded border ${theme === "light" ? "bg-emerald-100 text-emerald-700 border-emerald-200" : "bg-emerald-600/20 text-emerald-400 border-emerald-600/30"}`}>✓ Active</span>
                       )}
                       <span className={`text-xs ${hasKey ? "text-emerald-500" : "text-amber-500"}`}>
                         {hasKey ? t("providers.keySet") : t("providers.keyMissing")}
                       </span>
+                      {p.verified && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded border ${theme === "light" ? "bg-emerald-100 text-emerald-700 border-emerald-200" : "bg-emerald-600/20 text-emerald-400 border-emerald-600/30"}`}>
+                          ✓ {t("providers.verified")}
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-zinc-500 mt-0.5 truncate">{p.upstream}</div>
                     {testState && (
@@ -281,15 +313,15 @@ function App() {
                   {/* Actions */}
                   <div className="flex items-center gap-1 shrink-0">
                     {/* Active toggle */}
-                    <button onClick={() => applyModel(p.model)}
-                      className={`text-xs px-2 py-1 rounded border transition ${
-                        p.model === currentModel
-                          ? "bg-emerald-600/20 text-emerald-400 border border-emerald-600/30"
-                          : (theme === "light" ? "border-zinc-200 text-zinc-500 hover:border-emerald-300" : "border-zinc-700 text-zinc-500 hover:border-emerald-600")
-                      }`}>
-                      {p.model === currentModel ? "● Active" : "○ Activate"}
-                    </button>
-                    <button onClick={() => testProvider(p)} disabled={testing[p.id]}
+                    <Switch
+                      checked={p.id === activeId}
+                      onChange={() => p.id === activeId ? deactivateModel() : applyModel(p)}
+                      disabled={!hasKey || !p.verified}
+                      title={!hasKey ? t("providers.keyMissing") : !p.verified ? t("providers.testFirst") : ""}
+                      theme={theme}
+                    />
+                    <button onClick={() => testProvider(p)} disabled={testing[p.id] || !hasKey}
+                      title={!hasKey ? t("providers.keyMissing") : ""}
                       className={`p-1.5 text-xs rounded transition disabled:opacity-50 ${theme === "light" ? "hover:bg-zinc-100 text-zinc-400" : "hover:bg-zinc-700 text-zinc-400"}`}>
                       {testing[p.id] ? "⏳" : "🔍"}
                     </button>
@@ -408,6 +440,24 @@ function App() {
   );
 }
 
+function Switch({ checked, onChange, disabled, title, theme }: {
+  checked: boolean; onChange: () => void; disabled?: boolean; title?: string; theme: string;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      title={title}
+      onClick={onChange}
+      className={`relative w-9 h-5 rounded-full transition ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"} ${
+        checked ? "bg-blue-600" : theme === "light" ? "bg-zinc-300" : "bg-zinc-600"
+      }`}>
+      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? "translate-x-4" : ""}`} />
+    </button>
+  );
+}
+
 function Modal({ children, onClose, title, theme }: {
   children: React.ReactNode; onClose: () => void; title: string; theme: string;
 }) {
@@ -429,19 +479,34 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
   const [fetching, setFetching] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<{id:string,name:string,context_length:number}[]>([]);
   const [fetchMsg, setFetchMsg] = useState("");
+  const [fetchOk, setFetchOk] = useState(false);
+
+  const canSave = isQuick
+    ? form.api_key.trim().length > 0
+    : (form.name.trim().length > 0 && form.model.trim().length > 0 && form.upstream.trim().length > 0);
+
+  useEffect(() => {
+    setForm({ ...provider });
+    setFetchedModels([]);
+    setFetchMsg("");
+    setFetchOk(false);
+  }, [provider]);
 
   const fetchModels = async () => {
-    if (!form.upstream || !form.api_key || form.api_key.length < 4) {
+    if (!form.upstream || !form.api_key || !form.api_key.trim()) {
       setFetchMsg(t("providers.enterKeyFirst"));
+      setFetchOk(false);
       return;
     }
     setFetching(true);
     setFetchMsg(t("providers.fetching"));
+    setFetchOk(false);
     try {
       const result: any = await invoke("fetch_models", { upstream: form.upstream, apiKey: form.api_key });
       const models = result.models || [];
       setFetchedModels(models);
       setFetchMsg(t("providers.foundModels").replace("{n}", String(models.length)));
+      setFetchOk(true);
       if (models.length === 1) {
         setForm(f => ({ ...f, model: models[0].id }));
         if (models[0].context_length > 0) {
@@ -450,6 +515,7 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
       }
     } catch (e: any) {
       setFetchMsg(String(e).slice(0, 120));
+      setFetchOk(false);
     }
     setFetching(false);
   };
@@ -459,7 +525,7 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
       <div className={`rounded-xl p-5 w-full max-w-md mx-4 ${theme === "light" ? "bg-white border border-zinc-200" : "bg-zinc-900 border border-zinc-700"}`}
         onClick={e => e.stopPropagation()}>
         <h3 className="text-base font-semibold mb-1">
-          {provider.id ? t("modal.editTitle") : t("modal.addTitle")}
+          {isQuick ? t("modal.quickSetup") : (provider.id ? t("modal.editTitle") : t("modal.addTitle"))}
         </h3>
         {isQuick && (
           <p className="text-xs text-emerald-500 mb-3">{t("modal.quickSetup")}: {t("modal.apiKeyOnly")}</p>
@@ -490,7 +556,7 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
               } disabled:opacity-50`}>
               {fetching ? "⏳" : "📡"} {t("providers.fetchModels")}
             </button>
-            {fetchMsg && <span className={`text-xs ${fetchMsg.includes(t("providers.foundModels").replace("{n}","")) || fetchMsg.startsWith("找到") || fetchMsg.startsWith("Found") ? "text-emerald-500" : fetchMsg === t("providers.enterKeyFirst") ? "text-zinc-500" : "text-red-400"}`}>{fetchMsg}</span>}
+            {fetchMsg && <span className={`text-xs ${fetchOk ? "text-emerald-500" : fetchMsg === t("providers.enterKeyFirst") ? "text-zinc-500" : "text-red-400"}`}>{fetchMsg}</span>}
           </div>
           {/* Model selector from fetched models */}
           {fetchedModels.length > 0 && (
@@ -520,14 +586,10 @@ function ProviderEditor({ provider, isQuick, onSave, onClose, theme }: {
             className={`px-4 py-2 text-sm rounded transition ${theme === "light" ? "text-zinc-500 hover:text-zinc-700" : "text-zinc-400 hover:text-white"}`}>
             {t("modal.cancel")}
           </button>
-          <button onClick={() => {
-            if (fetchedModels.length > 1) {
-              // Pass fetched models through form for batch save
-              (form as any)._batch_models = fetchedModels;
-            }
-            onSave(form);
-          }}
-            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
+          <button onClick={() => onSave(form)}
+            disabled={!canSave}
+            title={!canSave ? (isQuick ? t("providers.enterKeyFirst") : t("modal.fillRequired")) : ""}
+            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium disabled:opacity-50 disabled:cursor-not-allowed">
             {t("modal.save")}
           </button>
         </div>

@@ -71,19 +71,44 @@ async function readBody(req) {
 }
 
 // ── Responses → Chat Completions ─────────────────────────────
+function parseToolArgs(raw) {
+  if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
+  if (raw && typeof raw === "object") return raw;
+  return {};
+}
+
 function responsesToChat(body) {
   const messages = [];
   if (body.instructions) messages.push({ role: "system", content: String(body.instructions) });
   const input = body.input;
   if (typeof input === "string") { messages.push({ role: "user", content: input }); return { model: body.model, messages, max_completion_tokens: body.max_output_tokens || 8192 }; }
   if (Array.isArray(input)) {
-    for (const item of input) {
-      if (item.type === "function_call_output") { messages.push({ role: "tool", tool_call_id: item.call_id, content: String(item.output ?? "") }); continue; }
-      if (item.type === "function_call") { let args = {}; try { args = JSON.parse(item.arguments || "{}"); } catch(e) {} messages.push({ role: "assistant", tool_calls: [{ id: item.call_id, type: "function", function: { name: item.name, arguments: JSON.stringify(args) } }] }); continue; }
+    let i = 0;
+    while (i < input.length) {
+      const item = input[i];
+      if (item.type === "function_call") {
+        const toolCalls = [];
+        while (i < input.length && input[i].type === "function_call") {
+          const fc = input[i];
+          toolCalls.push({ id: fc.call_id, type: "function", function: { name: fc.name, arguments: JSON.stringify(parseToolArgs(fc.arguments)) } });
+          i++;
+        }
+        messages.push({ role: "assistant", tool_calls: toolCalls });
+        continue;
+      }
+      if (item.type === "function_call_output") {
+        while (i < input.length && input[i].type === "function_call_output") {
+          const fco = input[i];
+          messages.push({ role: "tool", tool_call_id: fco.call_id, content: String(fco.output ?? "") });
+          i++;
+        }
+        continue;
+      }
       let role = item.role || "user"; if (role === "developer") role = "system";
       let content = item.content ?? item.text ?? "";
       if (Array.isArray(content)) content = content.filter(c => c.type === "input_text" || c.type === "output_text").map(c => c.text || "").join("\n");
       if (content) messages.push({ role, content: String(content) });
+      i++;
     }
   }
   if (!messages.length) messages.push({ role: "user", content: "ping" });
@@ -100,21 +125,27 @@ function responsesToAnthropic(body) {
   if (typeof input === "string") {
     messages.push({ role: "user", content: input });
   } else if (Array.isArray(input)) {
-    for (const item of input) {
-      if (item.type === "function_call_output") {
-        messages.push({
-          role: "user",
-          content: [{ type: "tool_result", tool_use_id: item.call_id, content: String(item.output ?? "") }]
-        });
+    let i = 0;
+    while (i < input.length) {
+      const item = input[i];
+      if (item.type === "function_call") {
+        const toolUses = [];
+        while (i < input.length && input[i].type === "function_call") {
+          const fc = input[i];
+          toolUses.push({ type: "tool_use", id: fc.call_id, name: fc.name, input: parseToolArgs(fc.arguments) });
+          i++;
+        }
+        messages.push({ role: "assistant", content: toolUses });
         continue;
       }
-      if (item.type === "function_call") {
-        let args = {};
-        try { args = JSON.parse(item.arguments || "{}"); } catch (e) { /* pass */ }
-        messages.push({
-          role: "assistant",
-          content: [{ type: "tool_use", id: item.call_id, name: item.name, input: args }]
-        });
+      if (item.type === "function_call_output") {
+        const toolResults = [];
+        while (i < input.length && input[i].type === "function_call_output") {
+          const fco = input[i];
+          toolResults.push({ type: "tool_result", tool_use_id: fco.call_id, content: String(fco.output ?? "") });
+          i++;
+        }
+        messages.push({ role: "user", content: toolResults });
         continue;
       }
       let role = item.role || "user";
@@ -126,31 +157,33 @@ function responsesToAnthropic(body) {
           if (part.type === "input_text" || part.type === "output_text") {
             parts.push({ type: "text", text: part.text || "" });
           } else if (part.type === "input_image") {
+            const imageUrl = part.image_url || "";
+            const mimeMatch = imageUrl.match(/^data:image\/(\w+);base64,/);
+            const mediaType = mimeMatch ? `image/${mimeMatch[1]}` : "image/png";
             parts.push({
               type: "image",
-              source: {
-                type: "base64",
-                media_type: "image/png",
-                data: (part.image_url || "").replace(/^data:image\/\w+;base64,/, "")
-              }
+              source: { type: "base64", media_type: mediaType, data: imageUrl.replace(/^data:image\/\w+;base64,/, "") }
             });
           }
         }
         content = parts.length ? parts : "";
       }
       if (content) messages.push({ role, content });
+      i++;
     }
   }
   if (!messages.length) messages.push({ role: "user", content: "ping" });
 
-  // Merge consecutive same-role messages
+  // Merge consecutive same-role text messages, but keep tool messages separate.
   const cleaned = [];
   for (const msg of messages) {
     if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === msg.role) {
       const prev = cleaned[cleaned.length - 1];
-      if (typeof prev.content === "string" && typeof msg.content === "string") {
+      const prevTool = prev.tool_call_id || prev.tool_calls || (Array.isArray(prev.content) && prev.content.some(c => c.type === "tool_use" || c.type === "tool_result"));
+      const msgTool = msg.tool_call_id || msg.tool_calls || (Array.isArray(msg.content) && msg.content.some(c => c.type === "tool_use" || c.type === "tool_result"));
+      if (!prevTool && !msgTool && typeof prev.content === "string" && typeof msg.content === "string") {
         prev.content += "\n" + msg.content;
-      } else if (Array.isArray(prev.content) && Array.isArray(msg.content)) {
+      } else if (!prevTool && !msgTool && Array.isArray(prev.content) && Array.isArray(msg.content)) {
         prev.content = [...prev.content, ...msg.content];
       } else { cleaned.push(msg); }
     } else { cleaned.push(msg); }
@@ -164,11 +197,37 @@ function sse(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+// ── Tool conversion helpers ──────────────────────────────────────
+function openaiToolsToAnthropic(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  const converted = [];
+  for (const t of tools) {
+    if (t.type === "function" && t.function) {
+      converted.push({
+        name: t.function.name,
+        description: t.function.description || "",
+        input_schema: t.function.parameters || { type: "object", properties: {} },
+      });
+    }
+  }
+  return converted.length ? converted : undefined;
+}
+
+function openaiToolChoiceToAnthropic(toolChoice) {
+  if (toolChoice === "auto") return { type: "auto" };
+  if (toolChoice === "none") return { type: "none" };
+  if (toolChoice === "required") return { type: "any" };
+  if (toolChoice && typeof toolChoice === "object" && toolChoice.type === "function" && toolChoice.function?.name) {
+    return { type: "tool", name: toolChoice.function.name };
+  }
+  return undefined;
+}
+
 // ── Request handler ─────────────────────────────────────────────
 async function handleResponses(req, res) {
   const raw = await readBody(req);
   let body;
-  try { body = JSON.parse(raw); } catch (e) {
+  try { body = JSON.parse(raw); } catch {
     return json(res, 400, { error: { message: "Invalid JSON" } });
   }
 
@@ -186,7 +245,10 @@ async function handleResponses(req, res) {
   const isChat = provider.protocol === "chat";
   const endpoint = isChat ? `${provider.upstream.replace(/\/$/, "")}/chat/completions` : `${provider.upstream.replace(/\/$/, "")}/messages`;
   const method = "POST";
-  const stream = body.stream !== false;
+  // Tool calling is not yet implemented for upstream streaming, so call upstream non-streamed
+  // when tools are present. The client still gets an SSE response (synthesized) if it asked for one.
+  const clientStream = body.stream === true;
+  const stream = clientStream && !body.tools;
   
   let upstreamBody;
   const headers = { "content-type": "application/json" };
@@ -195,6 +257,8 @@ async function handleResponses(req, res) {
     upstreamBody = responsesToChat(body);
     if (stream) upstreamBody.stream = true;
     if (body.temperature != null) upstreamBody.temperature = body.temperature;
+    if (body.tools) upstreamBody.tools = body.tools;
+    if (body.tool_choice != null) upstreamBody.tool_choice = body.tool_choice;
   } else {
     headers["x-api-key"] = provider.apiKey;
     headers["anthropic-version"] = "2023-06-01";
@@ -202,6 +266,10 @@ async function handleResponses(req, res) {
     upstreamBody = { model, max_tokens: body.max_output_tokens || 8192, messages, stream };
     if (system) upstreamBody.system = system;
     if (body.temperature != null) upstreamBody.temperature = body.temperature;
+    const anthropicTools = openaiToolsToAnthropic(body.tools);
+    if (anthropicTools) upstreamBody.tools = anthropicTools;
+    const anthropicToolChoice = openaiToolChoiceToAnthropic(body.tool_choice);
+    if (anthropicToolChoice) upstreamBody.tool_choice = anthropicToolChoice;
   }
 
   log("info", `→ ${model}  ${endpoint}`);
@@ -220,26 +288,57 @@ async function handleResponses(req, res) {
     return json(res, upstreamRes.status, { error: { message: text } });
   }
 
-  // Non-streaming
-  if (!stream) {
-    const data = await upstreamRes.json();
-    const text = isChat
-      ? (data.choices?.[0]?.message?.content || "")
-      : (data.content?.filter(c => c.type === "text").map(c => c.text).join("") || "");
+  // Parse a non-streaming upstream response into { text, toolCalls, usage }
+  const parseNonStream = async () => {
+    let data;
+    try { data = await upstreamRes.json(); } catch (e) {
+      throw new Error(`Invalid upstream JSON: ${e.message}`);
+    }
+    let text = "";
+    const toolCalls = [];
+    if (isChat) {
+      const message = data.choices?.[0]?.message;
+      const rawContent = message?.content;
+      if (typeof rawContent === "string") text = rawContent;
+      else if (Array.isArray(rawContent)) text = rawContent.map(c => c.type === "text" ? c.text : "").join("");
+      for (const tc of message?.tool_calls || []) {
+        toolCalls.push({ id: tc.id, type: "function_call", call_id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments || "" });
+      }
+    } else {
+      for (const c of data.content || []) {
+        if (c.type === "text") text += c.text;
+        if (c.type === "tool_use") {
+          toolCalls.push({ id: c.id, type: "function_call", call_id: c.id, name: c.name, arguments: JSON.stringify(c.input || {}) });
+        }
+      }
+    }
+    const usage = data.usage ? {
+      input_tokens: data.usage.input_tokens ?? data.usage.prompt_tokens ?? 0,
+      output_tokens: data.usage.output_tokens ?? data.usage.completion_tokens ?? 0,
+      total_tokens: data.usage.total_tokens ?? (
+        (data.usage.input_tokens ?? data.usage.prompt_tokens ?? 0) +
+        (data.usage.output_tokens ?? data.usage.completion_tokens ?? 0)
+      ),
+    } : undefined;
+    return { text, toolCalls, usage };
+  };
+
+  // Client requested a plain JSON response (no streaming)
+  if (!clientStream) {
+    let parsed;
+    try { parsed = await parseNonStream(); } catch (e) {
+      return json(res, 502, { error: { message: e.message } });
+    }
+    const { text, toolCalls, usage } = parsed;
+    const output = [{
+      id: `msg_${Date.now().toString(36)}`, type: "message", role: "assistant",
+      content: [{ type: "output_text", text }]
+    }];
+    output.push(...toolCalls);
     return json(res, 200, {
       id: responseId, object: "response",
       created_at: Math.floor(Date.now() / 1000),
-      status: "completed", model,
-      output: [{
-        id: `msg_${Date.now().toString(36)}`, type: "message", role: "assistant",
-        content: [{ type: "output_text", text }]
-      }],
-      output_text: text,
-      usage: data.usage ? {
-        input_tokens: data.usage.input_tokens || 0,
-        output_tokens: data.usage.output_tokens || 0,
-        total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
-      } : undefined,
+      status: "completed", model, output, output_text: text, usage,
     });
   }
 
@@ -257,6 +356,43 @@ async function handleResponses(req, res) {
     type: "response.created",
     response: { id: responseId, type: "response", status: "in_progress", model }
   });
+
+  // Tools present: upstream was called non-streamed — synthesize SSE from the full result.
+  if (!stream) {
+    let parsed;
+    try { parsed = await parseNonStream(); } catch (e) {
+      log("error", `Non-stream parse error: ${e.message}`);
+      sse(res, { type: "response.failed", response: { id: responseId, type: "response", status: "failed", error: { message: e.message } } });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+    const { text, toolCalls } = parsed;
+    const output = [];
+    if (text) {
+      const item = { id: outputId, type: "message", role: "assistant", content: [{ type: "output_text", text }] };
+      output.push(item);
+      sse(res, { type: "response.output_item.added", output_index: 0, item: { id: outputId, type: "message", role: "assistant", content: [] } });
+      sse(res, { type: "response.content_part.added", item_id: outputId, output_index: 0, content_index: 0, part: { type: "output_text", text: "" } });
+      sse(res, { type: "response.output_text.delta", item_id: outputId, output_index: 0, content_index: 0, delta: text });
+      sse(res, { type: "response.output_text.done", item_id: outputId, output_index: 0, content_index: 0, text });
+      sse(res, { type: "response.content_part.done", item_id: outputId, output_index: 0, content_index: 0, part: { type: "output_text", text } });
+      sse(res, { type: "response.output_item.done", output_index: 0, item });
+    }
+    for (const tc of toolCalls) {
+      const idx = output.length;
+      output.push(tc);
+      sse(res, { type: "response.output_item.added", output_index: idx, item: { ...tc, arguments: "" } });
+      sse(res, { type: "response.output_item.done", output_index: idx, item: tc });
+    }
+    sse(res, {
+      type: "response.completed",
+      response: { id: responseId, type: "response", status: "completed", model, output, output_text: text }
+    });
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
 
   try {
     const reader = upstreamRes.body.getReader();
@@ -277,7 +413,7 @@ async function handleResponses(req, res) {
         if (isChat) {
           // Chat Completions SSE → Responses SSE
           let event;
-          try { event = JSON.parse(payload); } catch(e) { continue; }
+          try { event = JSON.parse(payload); } catch { continue; }
           const delta = event.choices?.[0]?.delta;
           const content = delta?.content || "";
           if (!content) continue;
@@ -291,7 +427,7 @@ async function handleResponses(req, res) {
         } else {
           // Anthropic SSE → Responses SSE (existing)
           let event;
-          try { event = JSON.parse(payload); } catch(e) { continue; }
+          try { event = JSON.parse(payload); } catch { continue; }
           switch (event.type) {
             case "message_start":
               sse(res, { type: "response.output_item.added", output_index: outputIndex, item: { id: outputId, type: "message", role: "assistant", content: [] } });

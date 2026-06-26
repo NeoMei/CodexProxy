@@ -17,13 +17,6 @@ pub struct Provider {
     pub verified: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Settings {
-    pub proxy_port: u16,
-    pub auto_start: bool,
-    pub current_model: String,
-}
-
 pub struct Database {
     pub conn: Mutex<Connection>,
 }
