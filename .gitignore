@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local runtime config files that may contain API keys
+proxy/config.json
+.coding-plan-proxy.json

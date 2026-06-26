@@ -8,9 +8,7 @@
     "codexproxy": "./index.mjs"
   },
   "files": [
-    "index.mjs",
-    "config.example.toml",
-    "scripts/"
+    "index.mjs"
   ],
   "scripts": {
     "start": "node index.mjs",
