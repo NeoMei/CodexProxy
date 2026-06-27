@@ -17,6 +17,9 @@ pub fn write_curl_header_file(header: &str) -> Result<PathBuf, String> {
 }
 
 fn codex_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CODEX_HOME") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".codex")
 }
 
@@ -24,43 +27,51 @@ fn catalog_file() -> PathBuf {
     codex_dir().join("models-catalog.json")
 }
 
-/// Write Codex config.toml to point to the proxy with model mappings
+/// Write Codex config.toml to point to the proxy with model mappings.
+/// Preserves unrelated user settings (plugins, MCP servers, sandbox, etc.).
 pub fn write_codex_config(model: &str, proxy_port: u16, context_window: u64, verified_providers: &[Provider]) -> Result<(), String> {
     let dir = codex_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("config.toml");
 
-    let config = format!(
-        r#"model = "{model}"
-model_provider = "custom"
-model_context_window = {ctx}
+    let mut config: toml::Value = if path.exists() {
+        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        text.parse().map_err(|e: toml::de::Error| e.to_string())?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
 
-[model_providers.custom]
-name = "Coding Plan"
-wire_api = "responses"
-requires_openai_auth = true
-base_url = "http://127.0.0.1:{port}/v1"
+    let table = config.as_table_mut().ok_or("config.toml root is not a table")?;
 
-[model_providers.custom.models]
-{models_toml}
+    table.insert("model".to_string(), toml::Value::String(model.to_string()));
+    table.insert("model_provider".to_string(), toml::Value::String("custom".to_string()));
+    table.insert("model_context_window".to_string(), toml::Value::Integer(context_window as i64));
 
-[features]
-js_repl = false
-"#,
-        model = model,
-        ctx = context_window,
-        port = proxy_port,
-        models_toml = {
-            let mut seen = std::collections::HashSet::new();
-            verified_providers.iter()
-                .filter(|p| p.verified && !p.api_key.is_empty())
-                .filter(|p| seen.insert(&p.model))
-                .map(|p| format!("\"{}\" = \"{}\"", p.model, p.model))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-    );
+    let mut models = toml::map::Map::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in verified_providers.iter().filter(|p| p.verified && !p.api_key.is_empty()).filter(|p| seen.insert(&p.model)) {
+        models.insert(p.model.clone(), toml::Value::String(p.model.clone()));
+    }
 
-    fs::write(dir.join("config.toml"), &config).map_err(|e| e.to_string())?;
+    let mut custom = toml::map::Map::new();
+    custom.insert("name".to_string(), toml::Value::String("Coding Plan".to_string()));
+    custom.insert("wire_api".to_string(), toml::Value::String("responses".to_string()));
+    custom.insert("requires_openai_auth".to_string(), toml::Value::Boolean(true));
+    custom.insert("base_url".to_string(), toml::Value::String(format!("http://127.0.0.1:{}/v1", proxy_port)));
+    custom.insert("models".to_string(), toml::Value::Table(models));
+
+    let providers = table.entry("model_providers").or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if let Some(providers_table) = providers.as_table_mut() {
+        providers_table.insert("custom".to_string(), toml::Value::Table(custom));
+    }
+
+    let features = table.entry("features").or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if let Some(features_table) = features.as_table_mut() {
+        features_table.entry("js_repl").or_insert_with(|| toml::Value::Boolean(false));
+    }
+
+    let out = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(&path, out).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -118,10 +129,10 @@ pub fn write_model_catalog(providers: &[Provider]) -> Result<(), String> {
                 "web_search_tool_type": "text_and_image",
                 "truncation_policy": {"mode": "tokens", "limit": 10000},
                 "supports_parallel_tool_calls": true,
-                "supports_image_detail_original": false,
-                "experimental_supported_tools": [],
-                "input_modalities": ["text"],
-                "supports_search_tool": false,
+                "supports_image_detail_original": true,
+                "experimental_supported_tools": ["web_search", "web_search_preview", "web_search_2025_08_26", "browser", "chrome", "computer", "computer_use", "computer_use_preview", "file_search", "tool_search", "apply_patch", "function_shell", "container_auto", "namespace_tool", "custom_tool", "local_skill", "inline_skill", "local_environment"],
+                "input_modalities": ["text", "image"],
+                "supports_search_tool": true,
                 "use_responses_lite": false,
                 "base_instructions": "",
                 "instructions_variables": {
@@ -194,5 +205,44 @@ pub async fn test_provider_connection(provider: &Provider) -> Result<String, Str
     } else {
         let msg = if !stderr.is_empty() { stderr } else { body_text.into() };
         Err(format!("HTTP {}: {}", status, msg.chars().take(300).collect::<String>()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_codex_config_preserves_unrelated_settings() {
+        // Use a temp CODEX_HOME so we don't touch the real ~/.codex.
+        let tmp = std::env::temp_dir().join(format!("codexproxy-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CODEX_HOME", &tmp);
+
+        let initial = r#"
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[windows]
+sandbox = "elevated"
+
+[mcp_servers.node_repl]
+command = "node_repl"
+"#;
+        std::fs::write(tmp.join("config.toml"), initial).unwrap();
+
+        write_codex_config("test-model", 15731, 100000, &[]).unwrap();
+
+        let out = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
+        let parsed: toml::Value = out.parse().unwrap();
+        let table = parsed.as_table().unwrap();
+
+        assert_eq!(table.get("model").unwrap().as_str().unwrap(), "test-model");
+        assert!(table.get("plugins").is_some());
+        assert_eq!(table["windows"]["sandbox"].as_str().unwrap(), "elevated");
+        assert!(table.get("mcp_servers").is_some());
+
+        // cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

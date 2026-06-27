@@ -77,7 +77,7 @@ function parseToolArgs(raw) {
   return {};
 }
 
-function responsesToChat(body) {
+function responsesToChat(body, nameMap) {
   const messages = [];
   if (body.instructions) messages.push({ role: "system", content: String(body.instructions) });
   const input = body.input;
@@ -90,7 +90,7 @@ function responsesToChat(body) {
         const toolCalls = [];
         while (i < input.length && input[i].type === "function_call") {
           const fc = input[i];
-          toolCalls.push({ id: fc.call_id, type: "function", function: { name: fc.name, arguments: JSON.stringify(parseToolArgs(fc.arguments)) } });
+          toolCalls.push({ id: fc.call_id, type: "function", function: { name: nameMap?.forward.get(fc.name) || fc.name, arguments: JSON.stringify(parseToolArgs(fc.arguments)) } });
           i++;
         }
         messages.push({ role: "assistant", tool_calls: toolCalls });
@@ -201,14 +201,27 @@ function sse(res, event) {
 function openaiToolsToAnthropic(tools, nameMap) {
   if (!Array.isArray(tools)) return undefined;
   const converted = [];
+  const seen = new Set();
   for (const t of tools) {
+    let original, upstreamName, schema;
     if (t.type === "function" && t.function) {
-      converted.push({
-        name: nameMap?.get(t.function.name) || t.function.name,
-        description: t.function.description || "",
-        input_schema: t.function.parameters || { type: "object", properties: {} },
-      });
+      original = t.function.name;
+      upstreamName = nameMap?.get(original) || original;
+      schema = { description: t.function.description || "", parameters: t.function.parameters || { type: "object", properties: {} } };
+    } else if (t.type) {
+      original = t.type;
+      upstreamName = nameMap?.get(original) || original;
+      schema = BUILTIN_TOOL_SCHEMAS[original] || fallbackBuiltinSchema(original);
+    } else {
+      continue;
     }
+    if (seen.has(upstreamName)) continue;
+    seen.add(upstreamName);
+    converted.push({
+      name: upstreamName,
+      description: schema.description,
+      input_schema: schema.parameters,
+    });
   }
   return converted.length ? converted : undefined;
 }
@@ -219,6 +232,9 @@ function openaiToolChoiceToAnthropic(toolChoice, nameMap) {
   if (toolChoice === "required") return { type: "any" };
   if (toolChoice && typeof toolChoice === "object" && toolChoice.type === "function" && toolChoice.function?.name) {
     return { type: "tool", name: nameMap?.get(toolChoice.function.name) || toolChoice.function.name };
+  }
+  if (toolChoice && typeof toolChoice === "object" && toolChoice.type) {
+    return { type: "tool", name: nameMap?.get(toolChoice.type) || toolChoice.type };
   }
   return undefined;
 }
@@ -237,10 +253,18 @@ function buildToolNameMap(tools) {
   const reverse = new Map();
   if (!Array.isArray(tools)) return { forward, reverse };
   for (const t of tools) {
-    if (t.type !== "function" || !t.function?.name) continue;
-    const original = t.function.name;
+    let original;
+    if (t.type === "function" && t.function?.name) {
+      original = t.function.name;
+    } else if (t.type) {
+      original = t.type;
+    } else {
+      continue;
+    }
     if (forward.has(original)) continue;
     let sanitized = sanitizeToolName(original);
+    // Preserve clean built-in names like web_search / computer when they are valid.
+    if (/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(original)) sanitized = original;
     let unique = sanitized;
     let counter = 1;
     while (reverse.has(unique)) {
@@ -253,32 +277,243 @@ function buildToolNameMap(tools) {
 }
 
 // Chat Completions endpoints (Bailian /v1, etc.) only support function tools.
-// Codex may send built-in tools like "computer" or "web_search", which we must drop.
-function normalizeChatTools(tools) {
+// Codex may send built-in tools like "computer" or "web_search"; translate them
+// into function-tool equivalents so the model can still invoke them.
+function normalizeChatTools(tools, nameMap) {
   if (!Array.isArray(tools)) return undefined;
   const normalized = [];
+  const seen = new Set();
   for (const t of tools) {
+    let upstreamName;
+    let entry;
     if (t.type === "function" && t.function && typeof t.function.name === "string" && t.function.name) {
-      normalized.push({
+      upstreamName = nameMap.forward.get(t.function.name) || t.function.name;
+      entry = {
         type: "function",
         function: {
-          name: t.function.name,
+          name: upstreamName,
           description: t.function.description || "",
           parameters: t.function.parameters || { type: "object", properties: {} },
         }
-      });
+      };
+    } else if (t.type) {
+      upstreamName = nameMap.forward.get(t.type) || t.type;
+      entry = builtinToFunctionTool(t.type, upstreamName);
+    } else {
+      continue;
     }
+    if (seen.has(upstreamName)) continue;
+    seen.add(upstreamName);
+    normalized.push(entry);
   }
   return normalized.length ? normalized : undefined;
 }
 
-function normalizeChatToolChoice(toolChoice, tools) {
+function normalizeChatToolChoice(toolChoice, tools, nameMap) {
   if (toolChoice === "auto" || toolChoice === "none" || toolChoice === "required") return toolChoice;
-  if (toolChoice && typeof toolChoice === "object" && toolChoice.type === "function" && toolChoice.function?.name) {
-    const allowed = new Set((tools || []).filter(t => t.type === "function").map(t => t.function.name));
-    if (allowed.has(toolChoice.function.name)) return toolChoice;
+  if (toolChoice && typeof toolChoice === "object") {
+    const allowed = new Set();
+    for (const t of tools || []) {
+      if (t.type === "function" && t.function?.name) allowed.add(nameMap?.forward.get(t.function.name) || t.function.name);
+      else if (t.type) allowed.add(nameMap?.forward.get(t.type) || t.type);
+    }
+    if (toolChoice.type === "function" && toolChoice.function?.name) {
+      if (allowed.has(toolChoice.function.name)) return toolChoice;
+    } else if (toolChoice.type && allowed.has(nameMap?.forward.get(toolChoice.type) || toolChoice.type)) {
+      return { type: "function", function: { name: nameMap.forward.get(toolChoice.type) || toolChoice.type } };
+    }
   }
   return undefined;
+}
+
+// Schemas for OpenAI Responses built-in tools that Codex exposes as plugins.
+// We translate them into upstream function/tools calls so the model can invoke them.
+const BUILTIN_TOOL_SCHEMAS = {
+  web_search: {
+    description: "Search the web for current information. Provide a query string.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search query" } },
+      required: ["query"],
+    },
+  },
+  web_search_2025_08_26: {
+    description: "Search the web for current information.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+  web_search_preview: {
+    description: "Search the web for current information.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+  computer: {
+    description: "Control a virtual computer. Provide an action and any needed parameters.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["screenshot", "click", "type", "scroll", "key", "goto", "mouse_move", "left_click", "right_click", "double_click"],
+          description: "The computer action to perform",
+        },
+        coordinate: { type: "array", items: { type: "integer" }, description: "[x, y] coordinate" },
+        text: { type: "string", description: "Text to type or other string argument" },
+        url: { type: "string", description: "URL for goto actions" },
+        keys: { type: "array", items: { type: "string" }, description: "Keys for key actions" },
+      },
+      required: ["action"],
+    },
+  },
+  computer_use_preview: {
+    description: "Control a virtual computer environment.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["screenshot", "click", "type", "scroll", "key", "goto", "mouse_move", "left_click", "right_click", "double_click"],
+          description: "The computer action to perform",
+        },
+        coordinate: { type: "array", items: { type: "integer" } },
+        text: { type: "string" },
+        url: { type: "string" },
+        keys: { type: "array", items: { type: "string" } },
+      },
+      required: ["action"],
+    },
+  },
+  computer_use: {
+    description: "Control a virtual computer. Provide an action and any needed parameters.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["screenshot", "click", "type", "scroll", "key", "goto", "mouse_move", "left_click", "right_click", "double_click"],
+          description: "The computer action to perform",
+        },
+        coordinate: { type: "array", items: { type: "integer" }, description: "[x, y] coordinate" },
+        text: { type: "string", description: "Text to type or other string argument" },
+        url: { type: "string", description: "URL for goto actions" },
+        keys: { type: "array", items: { type: "string" }, description: "Keys for key actions" },
+      },
+      required: ["action"],
+    },
+  },
+  browser: {
+    description: "Control an in-app browser. Provide an action and any needed parameters.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["goto", "click", "type", "scroll", "screenshot", "back", "forward", "reload"],
+          description: "The browser action to perform",
+        },
+        url: { type: "string", description: "URL to navigate to" },
+        text: { type: "string", description: "Text to type" },
+        coordinate: { type: "array", items: { type: "integer" }, description: "[x, y] coordinate" },
+      },
+      required: ["action"],
+      additionalProperties: true,
+    },
+  },
+  chrome: {
+    description: "Control the Chrome / in-app browser. Provide an action and any needed parameters.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["goto", "click", "type", "scroll", "screenshot", "back", "forward", "reload"],
+          description: "The browser action to perform",
+        },
+        url: { type: "string", description: "URL to navigate to" },
+        text: { type: "string", description: "Text to type" },
+        coordinate: { type: "array", items: { type: "integer" }, description: "[x, y] coordinate" },
+      },
+      required: ["action"],
+      additionalProperties: true,
+    },
+  },
+  file_search: {
+    description: "Search files and documents. Provide one or more queries.",
+    parameters: {
+      type: "object",
+      properties: { queries: { type: "array", items: { type: "string" } } },
+      additionalProperties: true,
+    },
+  },
+  tool_search: {
+    description: "Search available tools for a given task.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  apply_patch: {
+    description: "Apply a patch to files.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  function_shell: {
+    description: "Run a shell command. Provide the command and a short description.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The shell command to run" },
+        description: { type: "string", description: "What the command does" },
+      },
+      required: ["command"],
+      additionalProperties: true,
+    },
+  },
+  container_auto: {
+    description: "Use an automated container environment.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  namespace_tool: {
+    description: "Use a namespaced tool.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  custom_tool: {
+    description: "Use a custom tool.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  local_skill: {
+    description: "Use a local skill.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  inline_skill: {
+    description: "Use an inline skill.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+  local_environment: {
+    description: "Use a local environment.",
+    parameters: { type: "object", additionalProperties: true },
+  },
+};
+
+function fallbackBuiltinSchema(type) {
+  return {
+    description: `Built-in Codex tool ${type}. Provide arguments as JSON.`,
+    parameters: { type: "object", additionalProperties: true },
+  };
+}
+
+function builtinToFunctionTool(original, upstreamName) {
+  const schema = BUILTIN_TOOL_SCHEMAS[original] || fallbackBuiltinSchema(original);
+  return {
+    type: "function",
+    function: {
+      name: upstreamName,
+      description: schema.description,
+      parameters: schema.parameters,
+    },
+  };
 }
 
 // ── Request handler ─────────────────────────────────────────────
@@ -313,11 +548,11 @@ async function handleResponses(req, res) {
   const toolNameMap = buildToolNameMap(body.tools);
   if (isChat) {
     headers["Authorization"] = `Bearer ${provider.apiKey}`;
-    upstreamBody = responsesToChat(body);
+    upstreamBody = responsesToChat(body, toolNameMap);
     if (stream) upstreamBody.stream = true;
     if (body.temperature != null) upstreamBody.temperature = body.temperature;
-    if (body.tools) upstreamBody.tools = normalizeChatTools(body.tools);
-    const chatToolChoice = normalizeChatToolChoice(body.tool_choice, body.tools);
+    if (body.tools) upstreamBody.tools = normalizeChatTools(body.tools, toolNameMap);
+    const chatToolChoice = normalizeChatToolChoice(body.tool_choice, body.tools, toolNameMap);
     if (chatToolChoice != null) upstreamBody.tool_choice = chatToolChoice;
   } else {
     headers["x-api-key"] = provider.apiKey;
@@ -363,7 +598,8 @@ async function handleResponses(req, res) {
       if (typeof rawContent === "string") text = rawContent;
       else if (Array.isArray(rawContent)) text = rawContent.map(c => c.type === "text" ? c.text : "").join("");
       for (const tc of message?.tool_calls || []) {
-        toolCalls.push({ id: tc.id, type: "function_call", call_id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments || "" });
+        const originalName = toolNameMap.reverse.get(tc.function?.name) || tc.function?.name;
+        toolCalls.push({ id: tc.id, type: "function_call", call_id: tc.id, name: originalName, arguments: tc.function?.arguments || "" });
       }
     } else {
       for (const c of data.content || []) {

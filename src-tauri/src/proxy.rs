@@ -1,8 +1,9 @@
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::Arc;
 use std::net::TcpStream;
 use std::time::Duration;
+use std::path::Path;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -66,9 +67,15 @@ pub fn start(&self, proxy_path: &str) -> Result<(), String> {
     cmd.arg(proxy_path).env("PROXY_PORT", self.port.to_string());
     #[cfg(windows)] { cmd.creation_flags(0x08000000); }
 
-    let child = cmd.spawn().map_err(|e| format!("Failed to start proxy: {}", e))?;
+    // Capture stderr so we can log proxy crashes.
+    let stderr_path = std::env::temp_dir().join(format!("codexproxy-stderr-{}.log", self.port));
+    let stderr_file = std::fs::File::create(&stderr_path).map_err(|e| format!("Failed to create stderr log: {}", e))?;
+    cmd.stderr(Stdio::from(stderr_file));
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to start proxy: {} (node={} script={})", e, node, proxy_path))?;
     std::thread::sleep(Duration::from_millis(500));
     if let Ok(mut guard) = self.child.lock() { *guard = Some(child); }
+    log::info!("Proxy stderr log: {}", stderr_path.display());
     Ok(())
 }
 
@@ -136,9 +143,33 @@ fn kill_port_occupants(port: u16) {
 pub type SharedProxyManager = Arc<ProxyManager>;
 
 fn find_node_binary() -> Option<String> {
+    // Try PATH first.
     for bin in ["node", "nodejs"] {
         if Command::new(bin).arg("--version").output().is_ok() {
             return Some(bin.to_string());
+        }
+    }
+    // Fallback to common Windows/macOS/Linux install locations.
+    let mut candidates: Vec<String> = vec![
+        r"C:\Program Files\nodejs\node.exe".to_string(),
+        r"C:\Program Files (x86)\nodejs\node.exe".to_string(),
+    ];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("node.exe").to_string_lossy().to_string());
+            candidates.push(parent.join("node").to_string_lossy().to_string());
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("AppData").join("Roaming").join("npm").join("node.exe").to_string_lossy().to_string());
+        candidates.push(home.join(".nvm").join("versions").join("node").to_string_lossy().to_string());
+        candidates.push("/usr/local/bin/node".to_string());
+        candidates.push("/usr/bin/node".to_string());
+        candidates.push("/opt/homebrew/bin/node".to_string());
+    }
+    for path in candidates {
+        if Path::new(&path).is_file() {
+            return Some(path);
         }
     }
     None
